@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; font-src 'self'">
+  <title>Workie Tokey</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="card" class="card">
+    <div class="header">
+      <span class="logo">◢ Workie Tokey</span>
+      <span class="header-buttons">
+        <button id="toggle-theme" class="toggle theme" title="라이트/다크 전환">◐</button>
+        <button id="toggle-card" class="toggle" title="컴팩트 모드">▾</button>
+      </span>
+    </div>
+    <div id="rows"></div>
+    <div class="footer" id="footer">대기 중...</div>
+  </div>
+
+  <div id="chip" class="chip hidden">
+    <span id="chip-items"></span>
+    <button id="toggle-chip" class="toggle" title="카드 모드">▸</button>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
