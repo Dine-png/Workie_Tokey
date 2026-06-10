@@ -1,52 +1,54 @@
 # Workie Tokey
 
-A borderless Windows desktop overlay that shows remaining token usage for AI tools (Claude Code, Codex) in real time.
-
-사용 중인 AI(Claude Code, Codex)의 남은 토큰 잔량을 화면 위에 창 없는 오버레이로 보여주는 Windows 데스크톱 앱.
+> A borderless Windows desktop overlay showing real-time token usage for Claude Code and Codex.
+>
+> 사용 중인 AI(Claude Code, Codex)의 남은 토큰 잔량을 화면 위에 창 없는 오버레이로 보여주는 Windows 데스크톱 앱.
 
 ---
 
 ## Download
 
-Get the latest installer from the [Releases](../../releases) page.
+**[→ Latest Release](../../releases/latest)**
 
 ---
 
-## Usage / 조작
+## Features / 기능
 
-- **Drag**: Move the card anywhere on screen (position is saved)
-- **드래그**: 카드를 잡아 이동 (위치 자동 저장)
+| | English | 한국어 |
+|---|---|---|
+| 🖱️ | Drag to move, position saved | 드래그로 이동, 위치 자동 저장 |
+| ◐ | Light / Dark theme toggle | 라이트/다크 테마 전환 |
+| ▾ | Card ↔ Compact chip mode | 카드 ↔ 컴팩트 칩 모드 |
+| 🔔 | Toast alert when below 20% (once per session) | 잔량 20% 이하 토스트 알림 (1회) |
 
-- **`◐`** — Toggle light/dark theme (saved, defaults to OS setting)
-- **`◐`** — 라이트/다크 테마 전환 (저장됨, 기본은 OS 따라감)
+---
 
-- **`▾`** — Toggle between card and compact chip mode
-- **`▾`** — 카드 ↔ 컴팩트 칩 모드 전환
+## Tray Icon / 트레이 아이콘
 
-- **Tray icon**: Shows real-time gauge (red when below 20%). Hover for tooltip: "Claude N% · Codex N% left". Click to hide/show window.
-- **트레이 아이콘**: 잔량 게이지로 실시간 변함 (20% 이하면 레드). 마우스를 올리면 툴팁. 클릭 = 창 숨김/복귀
+| Action | English | 한국어 |
+|---|---|---|
+| Hover | "Claude N% · Codex N% left" tooltip | 잔량 툴팁 표시 |
+| Left click | Hide / Show window | 창 숨김 / 복귀 |
+| Right click | Refresh · Auto-start · Reset position · Quit | 새로고침 · 자동시작 · 위치초기화 · 종료 |
 
-- **Tray right-click**: Menu (Refresh, Auto-start, Reset position, Quit)
-- **트레이 우클릭**: 메뉴 (새로고침, 자동 시작, 위치 초기화, 종료)
-
-- Toast notification when usage drops below 20% (once per window)
-- 잔량 20% 이하로 떨어지면 토스트 알림 (윈도우별 1회)
+Tray icon turns **red** when any token drops below 20%.
+잔량이 20% 이하면 트레이 아이콘이 **빨간색**으로 변합니다.
 
 ---
 
 ## Data Sources / 데이터 소스
 
-- **Claude**: `api.anthropic.com/api/oauth/usage` — same endpoint as Claude Code's `/usage`
-- **Codex**: `chatgpt.com/backend-api/wham/usage` (live), falls back to session log
+| AI | Endpoint |
+|---|---|
+| Claude | `api.anthropic.com/api/oauth/usage` |
+| Codex | `chatgpt.com/backend-api/wham/usage` (falls back to session log) |
 
-Both use locally stored login tokens — no separate login required.
-All values are displayed as **remaining %**.
-
-둘 다 로컬에 저장된 기존 로그인 토큰을 읽어 쓴다. 별도 로그인 불필요. 표기는 모두 **남은 %** 기준.
+Uses locally stored login tokens — **no separate login required.**
+로컬에 저장된 기존 로그인 토큰 사용 — **별도 로그인 불필요.**
 
 ---
 
-## Development / 개발 실행
+## Development / 개발
 
 ```sh
 npm install
@@ -60,10 +62,16 @@ npm run dist
 # → dist/WorkieTokey <version>.exe
 ```
 
-> **Windows build note:** electron-builder may hang when extracting `winCodeSign` cache due to macOS symlinks (`*.dylib`). If this happens, extract manually excluding darwin:
->
-> ```powershell
-> $c = "$env:LOCALAPPDATA\electron-builder\Cache\winCodeSign"
-> & "node_modules\7zip-bin\win\x64\7za.exe" x -snld -bd -y "$c\<id>.7z" "-o$c\<id>" "-xr!darwin"
-> ```
-> Then re-run `npm run dist`.
+<details>
+<summary>Windows build troubleshooting</summary>
+
+electron-builder may hang when extracting `winCodeSign` cache due to macOS symlinks. Extract manually excluding darwin:
+
+```powershell
+$c = "$env:LOCALAPPDATA\electron-builder\Cache\winCodeSign"
+& "node_modules\7zip-bin\win\x64\7za.exe" x -snld -bd -y "$c\<id>.7z" "-o$c\<id>" "-xr!darwin"
+```
+
+Then re-run `npm run dist`.
+
+</details>
