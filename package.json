@@ -1,6 +1,6 @@
 {
   "name": "workie-tokey",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "사용 중인 AI의 남은 토큰량을 보여주는 창 없는 오버레이",
   "author": "butei",
   "main": "src/main.js",
