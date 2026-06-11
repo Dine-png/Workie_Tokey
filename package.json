@@ -6,7 +6,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win portable"
+    "dist": "electron-builder --win nsis"
   },
   "license": "MIT",
   "devDependencies": {
@@ -27,9 +27,16 @@
     ],
     "win": {
       "target": [
-        "portable"
+        "nsis"
       ],
       "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "WorkieTokey"
     }
   }
 }

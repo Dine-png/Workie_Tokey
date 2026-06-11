@@ -6,6 +6,18 @@ const claude = require('./adapters/claude');
 const { makeTrayPng } = require('./trayicon');
 const i18n = require('../renderer/i18n');
 
+// 단일 인스턴스 보장 — 중복 실행 시 새 인스턴스는 종료하고 기존 오버레이를 표시
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (win && !win.isDestroyed()) {
+      win.show();
+      win.focus();
+    }
+  });
+}
+
 // 초기 추정 크기 — 렌더러가 실제 내용 크기를 측정해 즉시 보정한다
 const SIZES = {
   card: { width: 316, height: 206 },
