@@ -2,20 +2,30 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const CODEX_HOME = path.join(os.homedir(), '.codex');
-const AUTH_PATH = path.join(CODEX_HOME, 'auth.json');
-const SESSIONS_DIR = path.join(CODEX_HOME, 'sessions');
+const DEFAULT_CODEX_HOME = path.join(os.homedir(), '.codex');
 const USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 const TAIL_BYTES = 256 * 1024;
 const CACHE_MS = 60 * 1000;
 
-let cache = { at: 0, data: null };
+let cache = { at: 0, key: null, data: null };
+
+// 수동 지정 경로는 .codex 디렉터리를 가리켜야 한다 (auth.json / sessions 포함)
+function resolveHome(customPath) {
+  return customPath || DEFAULT_CODEX_HOME;
+}
+
+function detect(customPath) {
+  const home = resolveHome(customPath);
+  const exists = fs.existsSync(path.join(home, 'auth.json'))
+    || fs.existsSync(path.join(home, 'sessions'));
+  return { path: home, exists };
+}
 
 // ---------- 실시간: ChatGPT 백엔드 사용량 API ----------
 
-function loadAuth() {
+function loadAuth(home) {
   try {
-    return JSON.parse(fs.readFileSync(AUTH_PATH, 'utf8'));
+    return JSON.parse(fs.readFileSync(path.join(home, 'auth.json'), 'utf8'));
   } catch {
     return null;
   }
@@ -37,8 +47,8 @@ function normalizeApiWindow(w) {
   };
 }
 
-async function fetchUsageApi() {
-  const auth = loadAuth();
+async function fetchUsageApi(home) {
+  const auth = loadAuth(home);
   const token = auth && auth.tokens && auth.tokens.access_token;
   if (!token) return null;
 
@@ -127,8 +137,8 @@ function normalizeLogWindow(w) {
   };
 }
 
-function readFromLogs() {
-  const latest = findLatestSessionFile(SESSIONS_DIR);
+function readFromLogs(home) {
+  const latest = findLatestSessionFile(path.join(home, 'sessions'));
   if (!latest) return null;
 
   const lines = readTail(latest.file, TAIL_BYTES).split('\n');
@@ -159,20 +169,23 @@ function readFromLogs() {
 
 // ---------- 공개 인터페이스 ----------
 
-async function read() {
-  if (cache.data && Date.now() - cache.at < CACHE_MS) return cache.data;
+async function read(customPath) {
+  const home = resolveHome(customPath);
+  if (cache.data && cache.key === home && Date.now() - cache.at < CACHE_MS) {
+    return cache.data;
+  }
 
   let data = null;
   try {
-    data = await fetchUsageApi();
+    data = await fetchUsageApi(home);
   } catch {}
-  if (!data) data = readFromLogs();
+  if (!data) data = readFromLogs(home);
 
-  cache = { at: Date.now(), data };
+  cache = { at: Date.now(), key: home, data };
   return data;
 }
 
-module.exports = { read };
+module.exports = { read, detect };
 
 if (require.main === module) {
   read().then((d) => console.log(JSON.stringify(d, null, 2)));

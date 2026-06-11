@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const CRED_PATH = path.join(os.homedir(), '.claude', '.credentials.json');
+const DEFAULT_CRED_PATH = path.join(os.homedir(), '.claude', '.credentials.json');
 // Claude Code의 공개 OAuth client_id
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const USER_AGENT = 'claude-code/2.1.109';
@@ -13,11 +13,33 @@ const TOKEN_ENDPOINTS = [
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const CACHE_MS = 60 * 1000;
 
-let cache = { at: 0, data: null };
+let cache = { at: 0, key: null, data: null };
 
-function loadCredFile() {
+// 수동 지정 경로는 파일이든 디렉터리든 받는다 (디렉터리면 .credentials.json을 찾음)
+function resolveCredPath(customPath) {
+  if (customPath) {
+    try {
+      if (fs.statSync(customPath).isDirectory()) {
+        return path.join(customPath, '.credentials.json');
+      }
+    } catch {}
+    return customPath;
+  }
+  return DEFAULT_CRED_PATH;
+}
+
+function detect(customPath) {
+  const p = resolveCredPath(customPath);
+  let exists = false;
   try {
-    return JSON.parse(fs.readFileSync(CRED_PATH, 'utf8'));
+    exists = fs.statSync(p).isFile();
+  } catch {}
+  return { path: p, exists };
+}
+
+function loadCredFile(credPath) {
+  try {
+    return JSON.parse(fs.readFileSync(credPath, 'utf8'));
   } catch {
     return null;
   }
@@ -25,8 +47,8 @@ function loadCredFile() {
 
 // 리프레시 토큰은 사용 시마다 회전되므로, 갱신 결과를 반드시 파일에 되써서
 // Claude Code CLI의 로그인 세션이 깨지지 않게 유지한다
-function saveCredFile(full) {
-  fs.writeFileSync(CRED_PATH, JSON.stringify(full));
+function saveCredFile(credPath, full) {
+  fs.writeFileSync(credPath, JSON.stringify(full));
 }
 
 async function refreshToken(oauth) {
@@ -54,8 +76,8 @@ async function refreshToken(oauth) {
   return null;
 }
 
-async function getAccessToken() {
-  const full = loadCredFile();
+async function getAccessToken(credPath) {
+  const full = loadCredFile(credPath);
   const oauth = full && full.claudeAiOauth;
   if (!oauth || !oauth.refreshToken) return null;
 
@@ -68,7 +90,7 @@ async function getAccessToken() {
 
   full.claudeAiOauth = { ...oauth, ...fresh };
   try {
-    saveCredFile(full);
+    saveCredFile(credPath, full);
   } catch (err) {
     console.error('[claude adapter] credentials write-back failed:', err.message);
   }
@@ -84,11 +106,14 @@ function normalizeWindow(w) {
   };
 }
 
-async function read() {
-  if (cache.data && Date.now() - cache.at < CACHE_MS) return cache.data;
+async function read(customPath) {
+  const credPath = resolveCredPath(customPath);
+  if (cache.data && cache.key === credPath && Date.now() - cache.at < CACHE_MS) {
+    return cache.data;
+  }
 
   let data;
-  const token = await getAccessToken();
+  const token = await getAccessToken(credPath);
   if (!token) {
     data = { source: 'claude', error: 'auth' };
   } else {
@@ -119,11 +144,11 @@ async function read() {
     }
   }
 
-  cache = { at: Date.now(), data };
+  cache = { at: Date.now(), key: credPath, data };
   return data;
 }
 
-module.exports = { read };
+module.exports = { read, detect };
 
 if (require.main === module) {
   read().then((d) => console.log(JSON.stringify(d, null, 2)));

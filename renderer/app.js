@@ -5,6 +5,11 @@ const chipEl = document.getElementById('chip');
 const chipItemsEl = document.getElementById('chip-items');
 
 let lastState = null;
+// 메인에서 푸시되기 전 기본값 — 인식 안 된 AI는 숨김
+let prefs = { hideDisconnected: true };
+let lang = I18N.resolve('auto', navigator.language);
+
+const T = (key, params) => I18N.t(lang, key, params);
 
 function fmtReset(unixSeconds) {
   if (!unixSeconds) return '';
@@ -13,23 +18,22 @@ function fmtReset(unixSeconds) {
   const hh = String(d.getHours()).padStart(2, '0');
   const mm = String(d.getMinutes()).padStart(2, '0');
   const sameDay = d.toDateString() === now.toDateString();
-  if (sameDay) return `${hh}:${mm} 리셋`;
-  const days = ['일', '월', '화', '수', '목', '금', '토'];
-  return `${days[d.getDay()]} ${hh}:${mm} 리셋`;
+  const time = sameDay ? `${hh}:${mm}` : `${T('days')[d.getDay()]} ${hh}:${mm}`;
+  return T('reset', { time });
 }
 
 function fmtAgo(ms) {
   const sec = Math.round((Date.now() - ms) / 1000);
-  if (sec < 60) return '방금 갱신됨';
+  if (sec < 60) return T('justNow');
   const min = Math.round(sec / 60);
-  if (min < 60) return `${min}분 전 갱신`;
+  if (min < 60) return T('minAgo', { n: min });
   const hr = Math.round(min / 60);
-  if (hr < 24) return `${hr}시간 전 갱신`;
-  return `${Math.round(hr / 24)}일 전 갱신`;
+  if (hr < 24) return T('hrAgo', { n: hr });
+  return T('dayAgo', { n: Math.round(hr / 24) });
 }
 
 function windowNote(w, prefix) {
-  if (w.inferredReset) return prefix ? `${prefix} · 리셋됨` : '리셋됨';
+  if (w.inferredReset) return prefix ? `${prefix} · ${T('wasReset')}` : T('wasReset');
   const reset = fmtReset(w.resetsAt);
   return prefix ? `${prefix} · ${reset}` : reset;
 }
@@ -50,18 +54,19 @@ function buildRows(state) {
   if (cl && cl.secondary) {
     rows.push({
       id: 'claude',
-      label: 'Claude 주간',
+      weekly: true,
+      label: T('labelWeekly', { name: 'Claude' }),
       percent: 100 - cl.secondary.usedPercent,
       note: windowNote(cl.secondary, '')
     });
   }
-  if (!cl || cl.error) {
+  if ((!cl || cl.error) && !prefs.hideDisconnected) {
     rows.push({
       id: 'claude',
       label: 'Claude',
       dim: true,
       percent: null,
-      note: cl && cl.error === 'auth' ? '로그인 필요 (claude /login)' : '연결 안 됨'
+      note: cl && cl.error === 'auth' ? T('needLogin') : T('noConnection')
     });
   }
 
@@ -77,18 +82,30 @@ function buildRows(state) {
   if (cx && cx.secondary) {
     rows.push({
       id: 'codex',
-      label: 'Codex 주간',
+      weekly: true,
+      label: T('labelWeekly', { name: 'Codex' }),
       percent: 100 - cx.secondary.usedPercent,
       note: windowNote(cx.secondary, '')
     });
   }
-  if (!cx) {
+  if (!cx && !prefs.hideDisconnected) {
     rows.push({
       id: 'codex',
       label: 'Codex',
       dim: true,
       percent: null,
-      note: '데이터 없음'
+      note: T('noData')
+    });
+  }
+
+  // 전부 숨겨져 카드가 비면 안내 한 줄은 남긴다
+  if (rows.length === 0) {
+    rows.push({
+      id: 'claude',
+      label: T('noSources'),
+      dim: true,
+      percent: null,
+      note: T('checkSettings')
     });
   }
   return rows;
@@ -119,7 +136,7 @@ function render(state) {
     if (row.percent !== null) {
       const pct = document.createElement('span');
       pct.className = `pct ${colorClass(row)}`;
-      pct.textContent = `${Math.round(row.percent)}% 남음`;
+      pct.textContent = T('pctLeft', { pct: Math.round(row.percent) });
       value.append(pct);
     }
     const note = document.createElement('span');
@@ -147,12 +164,12 @@ function render(state) {
   const codexLive = cx && cx.realtime;
   let footer;
   if (claudeLive && codexLive) {
-    footer = '실시간 갱신';
+    footer = T('realtime');
   } else {
     const parts = [];
-    if (claudeLive) parts.push('Claude 실시간');
-    if (cx) parts.push(codexLive ? 'Codex 실시간' : `Codex ${fmtAgo(cx.fileMtimeMs)}`);
-    footer = parts.length > 0 ? parts.join(' · ') : '소스를 찾는 중...';
+    if (claudeLive) parts.push(T('nameRealtime', { name: 'Claude' }));
+    if (cx) parts.push(codexLive ? T('nameRealtime', { name: 'Codex' }) : `Codex ${fmtAgo(cx.fileMtimeMs)}`);
+    footer = parts.length > 0 ? parts.join(' · ') : T('searching');
   }
   footerEl.textContent = footer;
 
@@ -161,7 +178,7 @@ function render(state) {
 
 // 컴팩트 모드에는 5시간 윈도우만 표시
 function renderChip(rows) {
-  const visible = rows.filter((r) => r.percent !== null && !r.label.includes('주간'));
+  const visible = rows.filter((r) => r.percent !== null && !r.weekly);
   const items = [];
   visible.forEach((row, i) => {
     if (i > 0) {
@@ -183,7 +200,7 @@ function renderChip(rows) {
   });
   if (items.length === 0) {
     const empty = document.createElement('span');
-    empty.textContent = '데이터 없음';
+    empty.textContent = T('noData');
     items.push(empty);
   }
   chipItemsEl.replaceChildren(...items);
@@ -198,6 +215,25 @@ function applyMode(mode) {
 document.getElementById('toggle-card').addEventListener('click', () => window.workieTokey.toggleMode());
 document.getElementById('toggle-chip').addEventListener('click', () => window.workieTokey.toggleMode());
 document.getElementById('toggle-theme').addEventListener('click', () => window.workieTokey.toggleTheme());
+document.getElementById('open-settings').addEventListener('click', () => window.workieTokey.openSettings());
+
+// 버튼 툴팁 등 정적 텍스트에 현재 언어 반영
+function applyLang() {
+  document.getElementById('toggle-theme').title = T('themeToggleTitle');
+  document.getElementById('open-settings').title = T('settingsBtnTitle');
+  document.getElementById('toggle-card').title = T('compactTitle');
+  document.getElementById('toggle-chip').title = T('cardTitle');
+  if (!lastState) footerEl.textContent = T('waiting');
+}
+
+window.workieTokey.onSettingsUpdated((payload) => {
+  prefs = payload.settings;
+  lang = payload.language;
+  applyLang();
+  if (lastState) render(lastState);
+});
+
+applyLang();
 
 // 보이는 요소(카드/칩)의 실제 크기를 메인에 보고 → 창이 내용에 딱 맞게 줄어듦
 function reportSize() {

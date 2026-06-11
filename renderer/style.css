@@ -186,3 +186,113 @@ html, body {
   height: 13px;
   background: var(--border);
 }
+
+/* ---------- 설정 페이지 ---------- */
+
+.settings {
+  width: 320px;
+  -webkit-app-region: no-drag;
+}
+
+.settings .header {
+  -webkit-app-region: drag;
+  margin: -10px -12px 9px;
+  padding: 10px 12px 0;
+}
+
+.section { margin-bottom: 11px; }
+
+.section-title {
+  color: var(--text-hint);
+  border-bottom: 1px solid var(--hairline);
+  padding-bottom: 4px;
+  margin-bottom: 7px;
+}
+
+.segment {
+  display: flex;
+  gap: 4px;
+}
+
+.segment button {
+  flex: 1;
+  font-family: 'Galmuri11', sans-serif;
+  font-size: 11px;
+  padding: 5px 0;
+  background: var(--track);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-sub);
+  cursor: pointer;
+}
+.segment button:hover { color: var(--text); }
+.segment button.active {
+  background: var(--bg);
+  border-color: var(--border);
+  color: var(--text);
+  font-family: 'Galmuri11 Bold', sans-serif;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 7px;
+  cursor: pointer;
+}
+.check-row input { accent-color: var(--claude); cursor: pointer; }
+
+.select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 7px;
+}
+
+.select-row select {
+  font-family: 'Galmuri11', sans-serif;
+  font-size: 11px;
+  background: var(--track);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 3px 5px;
+  cursor: pointer;
+}
+
+.source { margin-bottom: 9px; }
+
+.source-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 3px;
+}
+
+.source-status.ok { color: var(--codex-text); }
+.source-status.bad { color: var(--text-hint); }
+
+.source-path {
+  color: var(--text-sub);
+  font-size: 10px;
+  word-break: break-all;
+  margin-bottom: 5px;
+}
+.source-path.dim { color: var(--text-hint); }
+
+.source-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.btn {
+  font-family: 'Galmuri11', sans-serif;
+  font-size: 11px;
+  background: var(--track);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-sub);
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.btn:hover { color: var(--text); }

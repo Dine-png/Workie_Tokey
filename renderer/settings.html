@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; font-src 'self'">
+  <title>Workie Tokey — 설정</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="settings" class="card settings">
+    <div class="header">
+      <span class="logo">◢ <span data-i18n="settingsHeader">설정</span></span>
+      <span class="header-buttons">
+        <button id="close" class="toggle" data-i18n-title="closeTitle" title="닫기">✕</button>
+      </span>
+    </div>
+
+    <div class="section">
+      <div class="section-title" data-i18n="secLanguage">언어</div>
+      <div class="select-row">
+        <span data-i18n="secLanguage">언어</span>
+        <select id="language">
+          <option value="auto" data-i18n="langAuto">자동 (시스템)</option>
+          <option value="ko">한국어</option>
+          <option value="en">English</option>
+          <option value="ja">日本語</option>
+          <option value="fr">Français</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title" data-i18n="secTheme">테마</div>
+      <div class="segment" id="theme-segment">
+        <button data-theme="system" data-i18n="themeSystem">시스템</button>
+        <button data-theme="light" data-i18n="themeLight">라이트</button>
+        <button data-theme="dark" data-i18n="themeDark">다크</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title" data-i18n="secGeneral">일반</div>
+      <label class="check-row">
+        <input type="checkbox" id="auto-launch">
+        <span data-i18n="optAutoLaunch">컴퓨터 시작 시 자동 실행</span>
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="hide-disconnected">
+        <span data-i18n="optHideDisconnected">인식 안 된 AI 숨기기</span>
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="notify">
+        <span data-i18n="optNotify">잔량 경고 알림</span>
+      </label>
+      <div class="select-row">
+        <span data-i18n="pollInterval">갱신 주기</span>
+        <select id="poll-seconds">
+          <option value="15" data-i18n="sec15">15초</option>
+          <option value="30" data-i18n="sec30">30초</option>
+          <option value="60" data-i18n="min1">1분</option>
+          <option value="300" data-i18n="min5">5분</option>
+        </select>
+      </div>
+      <div class="select-row">
+        <span data-i18n="alertThreshold">경고 기준 잔량</span>
+        <select id="alert-threshold">
+          <option value="10">10%</option>
+          <option value="20">20%</option>
+          <option value="30">30%</option>
+          <option value="50">50%</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title" data-i18n="secSources">소스 경로</div>
+
+      <div class="source" id="source-claude">
+        <div class="source-top">
+          <span class="source-name">Claude</span>
+          <span class="source-status"></span>
+        </div>
+        <div class="source-path"></div>
+        <div class="source-actions">
+          <button class="btn pick" data-i18n="pick">직접 지정...</button>
+          <button class="btn reset hidden" data-i18n="resetAuto">자동 인식으로</button>
+        </div>
+      </div>
+
+      <div class="source" id="source-codex">
+        <div class="source-top">
+          <span class="source-name">Codex</span>
+          <span class="source-status"></span>
+        </div>
+        <div class="source-path"></div>
+        <div class="source-actions">
+          <button class="btn pick" data-i18n="pick">직접 지정...</button>
+          <button class="btn reset hidden" data-i18n="resetAuto">자동 인식으로</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer" data-i18n="footerSaved">설정은 즉시 저장돼요</div>
+  </div>
+
+  <script src="i18n.js"></script>
+  <script src="settings.js"></script>
+</body>
+</html>
