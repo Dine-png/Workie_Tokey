@@ -9,10 +9,13 @@ let prefs = { showChart: true, chartCollapsed: {} };
 
 // chartCollapsed는 프로바이더별 접힘 상태 맵 { [providerId]: bool }.
 // 구버전(단일 boolean) 설정과의 호환을 위해 정규화한다.
+// 기본값은 '접힘' — 차트를 처음 켜면 접힌 채로 시작하고, 사용자가 펼치면
+// 그 선택만 저장한다.
 function isChartCollapsed(id) {
   const c = prefs.chartCollapsed;
   if (typeof c === 'boolean') return c;
-  return !!(c && c[id]);
+  if (c && Object.prototype.hasOwnProperty.call(c, id)) return !!c[id];
+  return true;
 }
 
 const isDark = () => window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -382,6 +385,9 @@ ro.observe(chipEl);
 
 window.workieTokey.onState(render);
 window.workieTokey.onMode((mode) => {
+  // 모드를 바꿀 때(특히 컴팩트 → 카드로 다시 확대할 때)는 항상 설정 화면을
+  // 닫고 일반 카드부터 보여준다.
+  closeSettings();
   applyMode(mode);
   reportSize();
 });

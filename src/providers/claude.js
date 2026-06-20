@@ -66,6 +66,12 @@ async function refreshToken(oauth) {
   return null;
 }
 
+// 진행 중인 refresh를 하나로 합쳐(in-flight dedup) 동시에 두 번 갱신하지
+// 않게 한다. Anthropic refresh token은 사용 시 회전(rotate)되므로, 폴링과
+// HTTP API가 동시에 refresh하면 한쪽이 토큰을 회전시켜 다른 쪽이
+// invalid_grant로 깨지고 순간적으로 '로그아웃'으로 보일 수 있다.
+let refreshInFlight = null;
+
 async function getAccessToken() {
   const full = loadCredFile();
   const oauth = full && full.claudeAiOauth;
@@ -75,16 +81,23 @@ async function getAccessToken() {
     return oauth.accessToken;
   }
 
-  const fresh = await refreshToken(oauth);
-  if (!fresh) return null;
-
-  full.claudeAiOauth = { ...oauth, ...fresh };
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    const fresh = await refreshToken(oauth);
+    if (!fresh) return null;
+    full.claudeAiOauth = { ...oauth, ...fresh };
+    try {
+      saveCredFile(full);
+    } catch (err) {
+      console.error('[claude provider] credentials write-back failed:', err.message);
+    }
+    return fresh.accessToken;
+  })();
   try {
-    saveCredFile(full);
-  } catch (err) {
-    console.error('[claude provider] credentials write-back failed:', err.message);
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
   }
-  return fresh.accessToken;
 }
 
 function windowRemaining(w) {
