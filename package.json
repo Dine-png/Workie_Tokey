@@ -1,12 +1,12 @@
 {
   "name": "workie-tokey",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "사용 중인 AI의 남은 토큰량을 보여주는 창 없는 오버레이",
   "author": "butei",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win nsis"
+    "dist": "electron-builder --win portable"
   },
   "license": "MIT",
   "devDependencies": {
@@ -27,16 +27,9 @@
     ],
     "win": {
       "target": [
-        "nsis"
+        "portable"
       ],
       "icon": "build/icon.png"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "WorkieTokey"
     }
   }
 }

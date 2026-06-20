@@ -3,15 +3,16 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('workieTokey', {
   onState: (callback) => ipcRenderer.on('state', (_event, state) => callback(state)),
   onMode: (callback) => ipcRenderer.on('mode', (_event, mode) => callback(mode)),
-  onSettingsUpdated: (callback) => ipcRenderer.on('settings-updated', (_event, payload) => callback(payload)),
+  onPrefs: (callback) => ipcRenderer.on('prefs', (_event, prefs) => callback(prefs)),
   toggleMode: () => ipcRenderer.send('toggle-mode'),
   toggleTheme: () => ipcRenderer.send('toggle-theme'),
+  setChartCollapsed: (id, collapsed) => ipcRenderer.send('set-chart-collapsed', { id, collapsed }),
   reportSize: (width, height) => ipcRenderer.send('content-size', { width, height }),
-  reportSettingsSize: (width, height) => ipcRenderer.send('settings-size', { width, height }),
-  openSettings: () => ipcRenderer.send('open-settings'),
-  closeSettings: () => ipcRenderer.send('close-settings'),
+  // 설정 패널
   getSettings: () => ipcRenderer.invoke('get-settings'),
-  setSettings: (patch) => ipcRenderer.invoke('set-settings', patch),
-  setAutoLaunch: (enabled) => ipcRenderer.invoke('set-auto-launch', enabled),
-  pickSourcePath: (which) => ipcRenderer.invoke('pick-source-path', which)
+  setShowChart: (on) => ipcRenderer.send('set-show-chart', on),
+  setAutostart: (on) => ipcRenderer.send('set-autostart', on),
+  resetPosition: () => ipcRenderer.send('reset-position'),
+  refreshNow: () => ipcRenderer.send('refresh-now'),
+  quitApp: () => ipcRenderer.send('quit-app')
 });

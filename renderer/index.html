@@ -11,13 +11,36 @@
     <div class="header">
       <span class="logo">◢ Workie Tokey</span>
       <span class="header-buttons">
-        <button id="toggle-theme" class="toggle theme" title="라이트/다크 전환">◐</button>
         <button id="open-settings" class="toggle theme" title="설정">⚙</button>
+        <button id="toggle-theme" class="toggle theme" title="라이트/다크 전환">◐</button>
         <button id="toggle-card" class="toggle" title="컴팩트 모드">▾</button>
       </span>
     </div>
     <div id="rows"></div>
     <div class="footer" id="footer">대기 중...</div>
+
+    <div id="settings" class="settings hidden">
+      <div class="settings-row settings-toggle" id="set-show-chart">
+        <span class="settings-label">사용량 그래프 표시</span>
+        <span class="switch"><span class="switch-knob"></span></span>
+      </div>
+      <div class="settings-row settings-toggle" id="set-autostart">
+        <span class="settings-label">시작 시 자동 실행</span>
+        <span class="switch"><span class="switch-knob"></span></span>
+      </div>
+      <div class="settings-row settings-action" id="set-refresh">
+        <span class="settings-label">지금 새로고침</span>
+        <span class="settings-chevron">↻</span>
+      </div>
+      <div class="settings-row settings-action" id="set-reset-pos">
+        <span class="settings-label">위치 초기화</span>
+        <span class="settings-chevron">⌖</span>
+      </div>
+      <div class="settings-row settings-action danger" id="set-quit">
+        <span class="settings-label">종료</span>
+        <span class="settings-chevron">✕</span>
+      </div>
+    </div>
   </div>
 
   <div id="chip" class="chip hidden">
@@ -25,7 +48,6 @@
     <button id="toggle-chip" class="toggle" title="카드 모드">▸</button>
   </div>
 
-  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

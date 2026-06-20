@@ -1,74 +1,35 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen, Notification, nativeTheme, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen, Notification, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const codex = require('./adapters/codex');
-const claude = require('./adapters/claude');
+const registry = require('./providers');
+const httpapi = require('./httpapi');
 const { makeTrayPng } = require('./trayicon');
-const i18n = require('../renderer/i18n');
 
-// 단일 인스턴스 보장 — 중복 실행 시 새 인스턴스는 종료하고 기존 오버레이를 표시
-if (!app.requestSingleInstanceLock()) {
-  app.quit();
-} else {
-  app.on('second-instance', () => {
-    if (win && !win.isDestroyed()) {
-      win.show();
-      win.focus();
-    }
-  });
-}
-
+const POLL_MS = 30 * 1000;
 // 초기 추정 크기 — 렌더러가 실제 내용 크기를 측정해 즉시 보정한다
 const SIZES = {
   card: { width: 316, height: 206 },
   compact: { width: 230, height: 36 }
 };
 
-const DEFAULT_SETTINGS = {
-  theme: 'system',          // 'system' | 'light' | 'dark'
-  language: 'auto',         // 'auto' | 'ko' | 'en' | 'ja' | 'fr'
-  hideDisconnected: true,   // 인식 안 된 AI를 목록에서 숨김
-  notify: true,             // 잔량 경고 알림
-  pollSeconds: 30,          // 갱신 주기
-  alertThreshold: 20,       // 잔량 경고 기준 %
-  sources: {
-    claude: { path: null }, // null이면 자동 인식
-    codex: { path: null }
-  }
-};
-
 let win = null;
-let settingsWin = null;
 let tray = null;
 let pollTimer = null;
+let apiServer = null;
+let latestState = null; // 로컬 HTTP API가 노출하는 최신 스냅샷
 
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json');
 
 function loadSettings() {
-  let saved = {};
   try {
-    saved = JSON.parse(fs.readFileSync(settingsPath(), 'utf8'));
-  } catch {}
-  return {
-    ...DEFAULT_SETTINGS,
-    ...saved,
-    sources: {
-      claude: { ...DEFAULT_SETTINGS.sources.claude, ...(saved.sources && saved.sources.claude) },
-      codex: { ...DEFAULT_SETTINGS.sources.codex, ...(saved.sources && saved.sources.codex) }
-    }
-  };
+    return JSON.parse(fs.readFileSync(settingsPath(), 'utf8'));
+  } catch {
+    return {};
+  }
 }
 
 function saveSettings(patch) {
-  const cur = loadSettings();
-  const next = {
-    ...cur,
-    ...patch,
-    sources: {
-      claude: { ...cur.sources.claude, ...(patch.sources && patch.sources.claude) },
-      codex: { ...cur.sources.codex, ...(patch.sources && patch.sources.codex) }
-    }
-  };
+  const next = { ...loadSettings(), ...patch };
   try {
     fs.writeFileSync(settingsPath(), JSON.stringify(next, null, 2));
   } catch {}
@@ -85,8 +46,8 @@ function defaultPosition(size) {
 
 // 현재 위치를 기준으로, 새 크기로 바뀔 때 화면 안쪽으로 펴지도록 좌표 계산.
 // 창이 화면 어느 사분면에 있는지 보고 가까운 모서리를 고정점으로 삼는다.
-function anchoredBounds(targetWin, width, height) {
-  const b = targetWin.getBounds();
+function anchoredBounds(width, height) {
+  const b = win.getBounds();
   const wa = screen.getDisplayMatching(b).workArea;
   const centerX = b.x + b.width / 2;
   const centerY = b.y + b.height / 2;
@@ -114,12 +75,38 @@ function currentMode() {
   return loadSettings().compact ? 'compact' : 'card';
 }
 
-function currentLang() {
-  return i18n.resolve(loadSettings().language, app.getLocale());
+// 표기 관련 사용자 설정(렌더러로 전달). 기본: 그래프 표시 ON, 펼침.
+// chartCollapsed는 프로바이더별 접힘 맵 { [id]: bool } (구버전 boolean 호환).
+function currentPrefs() {
+  const s = loadSettings();
+  let chartCollapsed = s.chartCollapsed;
+  if (typeof chartCollapsed === 'boolean') chartCollapsed = {};
+  if (!chartCollapsed || typeof chartCollapsed !== 'object') chartCollapsed = {};
+  return {
+    showChart: s.showChart !== false,
+    chartCollapsed
+  };
 }
 
-function t(key, params) {
-  return i18n.t(currentLang(), key, params);
+function isAutostart() {
+  return app.getLoginItemSettings({ args: loginItemArgs() }).openAtLogin;
+}
+
+function setAutostart(on) {
+  app.setLoginItemSettings({ openAtLogin: on, path: process.execPath, args: loginItemArgs() });
+}
+
+function resetPosition() {
+  if (!win || win.isDestroyed()) return;
+  const b = win.getBounds();
+  const pos = defaultPosition(b);
+  win.setBounds({ ...pos, width: b.width, height: b.height });
+  saveSettings(pos);
+}
+
+function sendPrefs() {
+  if (!win || win.isDestroyed()) return;
+  win.webContents.send('prefs', currentPrefs());
 }
 
 function createWindow() {
@@ -160,112 +147,48 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', () => {
     win.webContents.send('mode', currentMode());
-    win.webContents.send('settings-updated', settingsPayload());
+    sendPrefs();
     tick();
   });
 }
 
-function createSettingsWindow() {
-  if (settingsWin && !settingsWin.isDestroyed()) {
-    settingsWin.show();
-    settingsWin.focus();
-    return;
-  }
-
-  settingsWin = new BrowserWindow({
-    width: 350,
-    height: 540,
-    frame: false,
-    transparent: true,
-    alwaysOnTop: true,
-    skipTaskbar: false,
-    resizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    hasShadow: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  });
-
-  settingsWin.setMenu(null);
-  settingsWin.setIcon(nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'icon.png')));
-  settingsWin.loadFile(path.join(__dirname, '..', 'renderer', 'settings.html'));
-  settingsWin.on('closed', () => {
-    settingsWin = null;
-  });
-}
-
-// 소스별 자동 인식 상태 (인식된 경로 / 수동 지정 여부)
-function detectSources() {
-  const s = loadSettings();
-  return {
-    claude: { custom: s.sources.claude.path, ...claude.detect(s.sources.claude.path) },
-    codex: { custom: s.sources.codex.path, ...codex.detect(s.sources.codex.path) }
-  };
-}
-
-function settingsPayload() {
-  return {
-    settings: loadSettings(),
-    language: currentLang(),
-    autoLaunch: app.getLoginItemSettings({ args: loginItemArgs() }).openAtLogin,
-    sources: detectSources()
-  };
-}
-
-function broadcastSettings() {
-  const payload = settingsPayload();
-  for (const w of [win, settingsWin]) {
-    if (w && !w.isDestroyed()) w.webContents.send('settings-updated', payload);
-  }
-}
-
+// 모든 등록된 프로바이더를 수집 → { collectedAt, providers: [...] }
 async function collect() {
-  const s = loadSettings();
-  let codexState = null;
-  let claudeState = null;
-  try {
-    codexState = await codex.read(s.sources.codex.path);
-  } catch (err) {
-    console.error('[codex adapter]', err.message);
-  }
-  try {
-    claudeState = await claude.read(s.sources.claude.path);
-  } catch (err) {
-    console.error('[claude adapter]', err.message);
-  }
-  return {
-    collectedAt: Date.now(),
-    codex: codexState,
-    claude: claudeState
-  };
+  return registry.collectAll();
 }
 
-// 잔량이 경고 기준 이하로 떨어지는 순간 한 번만 알림 (리셋되면 다시 활성화)
+// 상태에서 모든 progress 라인을 (프로바이더 + 라인) 쌍으로 평탄화
+function progressLines(state) {
+  const out = [];
+  for (const p of state.providers || []) {
+    if (p.error) continue;
+    for (const line of p.lines || []) {
+      if (line.type === 'progress' && line.remainingPercent !== null) {
+        out.push({ provider: p, line });
+      }
+    }
+  }
+  return out;
+}
+
+// 잔량이 20% 이하로 떨어지는 순간 한 번만 알림 (리셋되면 다시 활성화)
+const ALERT_THRESHOLD = 20;
 const alerted = {};
 
 function checkAlerts(state) {
-  const { notify, alertThreshold } = loadSettings();
-  const entries = [];
-  if (state.claude && state.claude.primary) entries.push(['claude-5h', t('label5h', { name: 'Claude' }), state.claude.primary]);
-  if (state.claude && state.claude.secondary) entries.push(['claude-week', t('labelWeekly', { name: 'Claude' }), state.claude.secondary]);
-  if (state.codex && state.codex.primary) entries.push(['codex-5h', t('label5h', { name: 'Codex' }), state.codex.primary]);
-  if (state.codex && state.codex.secondary) entries.push(['codex-week', t('labelWeekly', { name: 'Codex' }), state.codex.secondary]);
-
-  for (const [key, label, w] of entries) {
-    const remaining = 100 - w.usedPercent;
-    if (remaining <= alertThreshold && !alerted[key]) {
+  for (const { provider, line } of progressLines(state)) {
+    const key = `${provider.id}-${line.key}`;
+    const label = line.label;
+    const remaining = line.remainingPercent;
+    if (remaining <= ALERT_THRESHOLD && !alerted[key]) {
       alerted[key] = true;
-      if (notify && Notification.isSupported()) {
+      if (Notification.isSupported()) {
         new Notification({
           title: 'Workie Tokey',
-          body: t('notifBody', { label, pct: Math.round(remaining) })
+          body: `${label} 잔량 ${Math.round(remaining)}% — 곧 한도에 도달해요`
         }).show();
       }
-    } else if (remaining > alertThreshold && alerted[key]) {
+    } else if (remaining > ALERT_THRESHOLD && alerted[key]) {
       alerted[key] = false;
     }
   }
@@ -275,51 +198,33 @@ function checkAlerts(state) {
 // 툴팁 = 소스별 5시간 잔량 텍스트
 function updateTray(state) {
   if (!tray) return;
-  const { alertThreshold } = loadSettings();
-  const parts = [];
-  if (state.claude && !state.claude.error && state.claude.primary) {
-    parts.push(`Claude ${Math.round(100 - state.claude.primary.usedPercent)}%`);
-  }
-  if (state.codex && state.codex.primary) {
-    parts.push(`Codex ${Math.round(100 - state.codex.primary.usedPercent)}%`);
-  }
-  tray.setToolTip(parts.length > 0
-    ? `Workie Tokey — ${t('trayLeft', { parts: parts.join(' · ') })}`
-    : 'Workie Tokey');
+  const all = progressLines(state);
 
-  const windows = [
-    state.claude && !state.claude.error ? state.claude.primary : null,
-    state.claude && !state.claude.error ? state.claude.secondary : null,
-    state.codex ? state.codex.primary : null,
-    state.codex ? state.codex.secondary : null
-  ].filter(Boolean);
-  if (windows.length > 0) {
-    const minRemaining = Math.min(...windows.map((w) => 100 - w.usedPercent));
-    tray.setImage(nativeImage.createFromBuffer(makeTrayPng(minRemaining, minRemaining <= alertThreshold)));
+  // 툴팁: 프로바이더별 첫 progress 라인(보통 5시간 윈도우) 잔량
+  const seen = new Set();
+  const parts = [];
+  for (const { provider, line } of all) {
+    if (seen.has(provider.id)) continue;
+    seen.add(provider.id);
+    parts.push(`${provider.label} ${Math.round(line.remainingPercent)}%`);
+  }
+  tray.setToolTip(parts.length > 0 ? `Workie Tokey — ${parts.join(' · ')} 남음` : 'Workie Tokey');
+
+  // 아이콘 게이지: 모든 윈도우 중 가장 적게 남은 값
+  if (all.length > 0) {
+    const minRemaining = Math.min(...all.map(({ line }) => line.remainingPercent));
+    tray.setImage(nativeImage.createFromBuffer(makeTrayPng(minRemaining, minRemaining <= ALERT_THRESHOLD)));
   }
 }
 
 async function tick() {
   if (!win || win.isDestroyed()) return;
   const state = await collect();
+  latestState = state;
   if (!win || win.isDestroyed()) return;
   win.webContents.send('state', state);
   checkAlerts(state);
   updateTray(state);
-  // 설정 창이 열려 있으면 소스 인식 상태도 갱신
-  if (settingsWin && !settingsWin.isDestroyed()) {
-    settingsWin.webContents.send('settings-updated', settingsPayload());
-  }
-}
-
-function restartPolling() {
-  clearInterval(pollTimer);
-  pollTimer = setInterval(tick, loadSettings().pollSeconds * 1000);
-}
-
-function applyTheme() {
-  const { theme } = loadSettings();
-  nativeTheme.themeSource = theme === 'light' || theme === 'dark' ? theme : 'system';
 }
 
 function setMode(mode) {
@@ -331,28 +236,20 @@ function setMode(mode) {
 }
 
 // 렌더러가 측정한 내용 크기에 맞춰 창을 줄이고, 화면 안쪽으로 펴지게 재배치
-function applyContentSize(targetWin, width, height, persist) {
-  if (!targetWin || targetWin.isDestroyed()) return;
+function applyContentSize(width, height) {
+  if (!win || win.isDestroyed()) return;
   width = Math.ceil(width);
   height = Math.ceil(height);
   if (width < 40 || height < 20) return;
-  const b = targetWin.getBounds();
+  const b = win.getBounds();
   if (b.width === width && b.height === height) return;
-  const next = anchoredBounds(targetWin, width, height);
-  targetWin.setBounds(next);
-  if (persist) saveSettings({ x: next.x, y: next.y });
+  const next = anchoredBounds(width, height);
+  win.setBounds(next);
+  saveSettings({ x: next.x, y: next.y });
 }
 
 function loginItemArgs() {
   return app.isPackaged ? [] : [app.getAppPath()];
-}
-
-function setAutoLaunch(enabled) {
-  app.setLoginItemSettings({
-    openAtLogin: enabled,
-    path: process.execPath,
-    args: loginItemArgs()
-  });
 }
 
 function buildTrayMenu() {
@@ -362,28 +259,37 @@ function buildTrayMenu() {
     { label: 'Workie Tokey', enabled: false },
     { type: 'separator' },
     {
-      label: compact ? t('trayCard') : t('trayCompact'),
+      label: compact ? '카드 모드로 전환' : '컴팩트 모드로 전환',
       click: () => setMode(compact ? 'card' : 'compact')
     },
-    { label: t('trayRefresh'), click: tick },
-    { label: t('traySettings'), click: createSettingsWindow },
+    { label: '지금 새로고침', click: tick },
     {
-      label: t('trayResetPos'),
-      click: () => {
-        const b = win.getBounds();
-        const pos = defaultPosition(b);
-        win.setBounds({ ...pos, width: b.width, height: b.height });
-        saveSettings(pos);
+      label: '사용량 그래프 표시',
+      type: 'checkbox',
+      checked: currentPrefs().showChart,
+      click: (item) => {
+        saveSettings({ showChart: item.checked });
+        sendPrefs();
       }
     },
+    {
+      label: '시작 시 자동 실행',
+      type: 'checkbox',
+      checked: isAutostart(),
+      click: (item) => setAutostart(item.checked)
+    },
+    {
+      label: '위치 초기화',
+      click: resetPosition
+    },
     { type: 'separator' },
-    { label: t('trayQuit'), click: () => app.quit() }
+    { label: '종료', click: () => app.quit() }
   ]));
 }
 
 function createTray() {
   tray = new Tray(nativeImage.createFromBuffer(makeTrayPng(100, false)));
-  tray.setToolTip(t('trayTooltip'));
+  tray.setToolTip('Workie Tokey — AI 토큰 잔량');
   // 트레이 클릭: 숨겨져 있으면 펼쳐진 카드 상태로 복귀, 보이면 숨김
   tray.on('click', () => {
     if (!win || win.isDestroyed()) return;
@@ -402,73 +308,57 @@ ipcMain.on('toggle-mode', () => {
 });
 
 ipcMain.on('content-size', (_event, size) => {
-  applyContentSize(win, size.width, size.height, true);
-});
-
-ipcMain.on('settings-size', (_event, size) => {
-  applyContentSize(settingsWin, size.width, size.height, false);
+  applyContentSize(size.width, size.height);
 });
 
 ipcMain.on('toggle-theme', () => {
   const next = nativeTheme.shouldUseDarkColors ? 'light' : 'dark';
+  nativeTheme.themeSource = next;
   saveSettings({ theme: next });
-  applyTheme();
-  broadcastSettings();
 });
 
-ipcMain.on('open-settings', createSettingsWindow);
-
-ipcMain.on('close-settings', () => {
-  if (settingsWin && !settingsWin.isDestroyed()) settingsWin.close();
+// 차트 접기/펼치기 (카드의 캐럿). 프로바이더별로 영구 저장.
+ipcMain.on('set-chart-collapsed', (_event, { id, collapsed }) => {
+  const map = currentPrefs().chartCollapsed;
+  map[id] = !!collapsed;
+  saveSettings({ chartCollapsed: map });
 });
 
-ipcMain.handle('get-settings', () => settingsPayload());
+// ── 설정 패널 IPC ──────────────────────────────────────
+ipcMain.handle('get-settings', () => ({
+  showChart: currentPrefs().showChart,
+  autostart: isAutostart()
+}));
 
-ipcMain.handle('set-settings', (_event, patch) => {
-  const before = loadSettings();
-  saveSettings(patch);
-  applyTheme();
-  if (patch.pollSeconds && patch.pollSeconds !== before.pollSeconds) restartPolling();
-  if (patch.language && patch.language !== before.language) buildTrayMenu();
-  broadcastSettings();
-  tick();
-  return settingsPayload();
+ipcMain.on('set-show-chart', (_event, on) => {
+  saveSettings({ showChart: !!on });
+  sendPrefs();
+  buildTrayMenu();
 });
 
-ipcMain.handle('set-auto-launch', (_event, enabled) => {
-  setAutoLaunch(enabled);
-  broadcastSettings();
-  return settingsPayload();
-});
+ipcMain.on('set-autostart', (_event, on) => setAutostart(!!on));
+ipcMain.on('reset-position', resetPosition);
+ipcMain.on('refresh-now', () => tick());
+ipcMain.on('quit-app', () => app.quit());
 
-// 소스 경로 직접 지정 — claude는 .credentials.json 파일, codex는 .codex 폴더
-ipcMain.handle('pick-source-path', async (_event, which) => {
-  if (!settingsWin || settingsWin.isDestroyed()) return null;
-  const opts = which === 'claude'
-    ? {
-        title: t('pickClaudeTitle'),
-        properties: ['openFile', 'showHiddenFiles'],
-        filters: [{ name: 'JSON', extensions: ['json'] }]
-      }
-    : {
-        title: t('pickCodexTitle'),
-        properties: ['openDirectory', 'showHiddenFiles']
-      };
-  const result = await dialog.showOpenDialog(settingsWin, opts);
-  if (result.canceled || result.filePaths.length === 0) return null;
-  return result.filePaths[0];
-});
 
 app.setAppUserModelId('com.workietokey.app');
 
 app.whenReady().then(() => {
-  applyTheme();
+  const savedTheme = loadSettings().theme;
+  if (savedTheme === 'light' || savedTheme === 'dark') {
+    nativeTheme.themeSource = savedTheme;
+  }
   createWindow();
   createTray();
-  restartPolling();
+  pollTimer = setInterval(tick, POLL_MS);
+  if (loadSettings().httpApi !== false) {
+    apiServer = httpapi.start(() => latestState);
+  }
 });
 
 app.on('window-all-closed', () => {
   clearInterval(pollTimer);
+  if (apiServer) apiServer.close();
   app.quit();
 });

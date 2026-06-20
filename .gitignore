@@ -1,6 +1,22 @@
-﻿node_modules/
-build/*
-!build/icon.png
+# 의존성 / 빌드 산출물
+node_modules/
 dist/
+
+# 테스트용 번들 (대용량)
+Tester/
+Tester.zip
+
+# 개인/과제 제출 자료 (공개 저장소에 올리지 않음)
+제출_과제/
+
+# 로컬 설정 / 임시 파일
 .claude/
-*.zip
+*.log
+elog.txt
+olog.txt
+~$*
+*.tmp
+
+# OS
+Thumbs.db
+.DS_Store

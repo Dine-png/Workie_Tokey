@@ -5,11 +5,20 @@ const chipEl = document.getElementById('chip');
 const chipItemsEl = document.getElementById('chip-items');
 
 let lastState = null;
-// 메인에서 푸시되기 전 기본값 — 인식 안 된 AI는 숨김
-let prefs = { hideDisconnected: true };
-let lang = I18N.resolve('auto', navigator.language);
+let prefs = { showChart: true, chartCollapsed: {} };
 
-const T = (key, params) => I18N.t(lang, key, params);
+// chartCollapsed는 프로바이더별 접힘 상태 맵 { [providerId]: bool }.
+// 구버전(단일 boolean) 설정과의 호환을 위해 정규화한다.
+function isChartCollapsed(id) {
+  const c = prefs.chartCollapsed;
+  if (typeof c === 'boolean') return c;
+  return !!(c && c[id]);
+}
+
+const isDark = () => window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+// 한 프로바이더의 대표(주요) 윈도우 키 — 나머지는 서브행으로 흐리게 표시
+const PRIMARY_KEYS = new Set(['5h', 'main']);
 
 function fmtReset(unixSeconds) {
   if (!unixSeconds) return '';
@@ -18,189 +27,282 @@ function fmtReset(unixSeconds) {
   const hh = String(d.getHours()).padStart(2, '0');
   const mm = String(d.getMinutes()).padStart(2, '0');
   const sameDay = d.toDateString() === now.toDateString();
-  const time = sameDay ? `${hh}:${mm}` : `${T('days')[d.getDay()]} ${hh}:${mm}`;
-  return T('reset', { time });
+  if (sameDay) return `${hh}:${mm} 리셋`;
+  const days = ['일', '월', '화', '수', '목', '금', '토'];
+  return `${days[d.getDay()]} ${hh}:${mm} 리셋`;
 }
 
 function fmtAgo(ms) {
   const sec = Math.round((Date.now() - ms) / 1000);
-  if (sec < 60) return T('justNow');
+  if (sec < 60) return '방금 갱신됨';
   const min = Math.round(sec / 60);
-  if (min < 60) return T('minAgo', { n: min });
+  if (min < 60) return `${min}분 전 갱신`;
   const hr = Math.round(min / 60);
-  if (hr < 24) return T('hrAgo', { n: hr });
-  return T('dayAgo', { n: Math.round(hr / 24) });
+  if (hr < 24) return `${hr}시간 전 갱신`;
+  return `${Math.round(hr / 24)}일 전 갱신`;
 }
 
-function windowNote(w, prefix) {
-  if (w.inferredReset) return prefix ? `${prefix} · ${T('wasReset')}` : T('wasReset');
-  const reset = fmtReset(w.resetsAt);
-  return prefix ? `${prefix} · ${reset}` : reset;
+function isWarn(remaining) {
+  return remaining !== null && remaining <= 20;
 }
 
-// 표시할 줄 목록으로 변환 — percent는 "남은 %" 기준
-function buildRows(state) {
-  const rows = [];
-
-  const cl = state && state.claude;
-  if (cl && cl.primary) {
-    rows.push({
-      id: 'claude',
-      label: 'Claude',
-      percent: 100 - cl.primary.usedPercent,
-      note: windowNote(cl.primary, '5h')
-    });
-  }
-  if (cl && cl.secondary) {
-    rows.push({
-      id: 'claude',
-      weekly: true,
-      label: T('labelWeekly', { name: 'Claude' }),
-      percent: 100 - cl.secondary.usedPercent,
-      note: windowNote(cl.secondary, '')
-    });
-  }
-  if ((!cl || cl.error) && !prefs.hideDisconnected) {
-    rows.push({
-      id: 'claude',
-      label: 'Claude',
-      dim: true,
-      percent: null,
-      note: cl && cl.error === 'auth' ? T('needLogin') : T('noConnection')
-    });
-  }
-
-  const cx = state && state.codex;
-  if (cx && cx.primary) {
-    rows.push({
-      id: 'codex',
-      label: 'Codex',
-      percent: 100 - cx.primary.usedPercent,
-      note: windowNote(cx.primary, '5h')
-    });
-  }
-  if (cx && cx.secondary) {
-    rows.push({
-      id: 'codex',
-      weekly: true,
-      label: T('labelWeekly', { name: 'Codex' }),
-      percent: 100 - cx.secondary.usedPercent,
-      note: windowNote(cx.secondary, '')
-    });
-  }
-  if (!cx && !prefs.hideDisconnected) {
-    rows.push({
-      id: 'codex',
-      label: 'Codex',
-      dim: true,
-      percent: null,
-      note: T('noData')
-    });
-  }
-
-  // 전부 숨겨져 카드가 비면 안내 한 줄은 남긴다
-  if (rows.length === 0) {
-    rows.push({
-      id: 'claude',
-      label: T('noSources'),
-      dim: true,
-      percent: null,
-      note: T('checkSettings')
-    });
-  }
-  return rows;
+// progress 라인의 부가 텍스트: [노트 prefix] · [리셋 시각]
+function progressNote(line) {
+  const parts = [];
+  if (line.note) parts.push(line.note);
+  const reset = fmtReset(line.resetsAt);
+  if (reset) parts.push(reset);
+  return parts.join(' · ');
 }
 
-function colorClass(row) {
-  if (row.percent !== null && row.percent <= 20) return 'warn';
-  return row.id;
+// ── 라인 종류별 DOM 빌더 ──────────────────────────────────────────
+function renderProgress(line, accent, accentText, sub) {
+  const div = document.createElement('div');
+  div.className = sub ? 'row sub' : 'row';
+
+  const warn = isWarn(line.remainingPercent);
+  const barColor = warn ? 'var(--warn)' : accent;
+  const txtColor = warn ? 'var(--warn-text)' : accentText;
+
+  const top = document.createElement('div');
+  top.className = 'row-top';
+
+  const label = document.createElement('span');
+  label.className = 'row-label';
+  label.textContent = line.label;
+
+  const value = document.createElement('span');
+  value.className = 'row-value';
+  const pct = document.createElement('span');
+  pct.className = 'pct';
+  pct.style.color = txtColor;
+  pct.textContent = `${Math.round(line.remainingPercent)}% 남음`;
+  value.append(pct);
+
+  const note = document.createElement('span');
+  note.className = 'note';
+  const noteText = progressNote(line);
+  note.textContent = noteText ? ` · ${noteText}` : '';
+  value.append(note);
+
+  top.append(label, value);
+  div.append(top);
+
+  const gauge = document.createElement('div');
+  gauge.className = 'gauge';
+  const fill = document.createElement('div');
+  fill.className = 'gauge-fill';
+  fill.style.background = barColor;
+  fill.style.width = `${Math.min(100, Math.max(0, line.remainingPercent))}%`;
+  gauge.append(fill);
+  div.append(gauge);
+  return div;
+}
+
+function renderText(line) {
+  const div = document.createElement('div');
+  div.className = 'row text-row';
+  const top = document.createElement('div');
+  top.className = 'row-top';
+  const label = document.createElement('span');
+  label.className = 'row-label';
+  label.textContent = line.label;
+  const value = document.createElement('span');
+  value.className = 'row-value note';
+  value.textContent = line.value;
+  top.append(label, value);
+  div.append(top);
+  if (line.subtitle) {
+    const sub = document.createElement('div');
+    sub.className = 'note';
+    sub.textContent = line.subtitle;
+    div.append(sub);
+  }
+  return div;
+}
+
+function renderBadge(line, accent) {
+  const div = document.createElement('div');
+  div.className = 'row text-row';
+  const top = document.createElement('div');
+  top.className = 'row-top';
+  const label = document.createElement('span');
+  label.className = 'row-label';
+  label.textContent = line.label;
+  const badge = document.createElement('span');
+  badge.className = 'badge';
+  badge.style.color = accent;
+  badge.style.borderColor = accent;
+  badge.textContent = line.badgeText;
+  top.append(label, badge);
+  div.append(top);
+  return div;
+}
+
+function renderBarChart(line, accent, providerId) {
+  const collapsed = isChartCollapsed(providerId);
+  const div = document.createElement('div');
+  div.className = collapsed ? 'row chart-row collapsed' : 'row chart-row';
+
+  // 헤더 전체가 접기/펼치기 토글 (no-drag)
+  const top = document.createElement('div');
+  top.className = 'row-top chart-head';
+  top.title = collapsed ? '펼치기' : '접기';
+
+  const left = document.createElement('span');
+  left.className = 'chart-head-left';
+  const caret = document.createElement('span');
+  caret.className = 'caret';
+  caret.textContent = collapsed ? '▸' : '▾';
+  const label = document.createElement('span');
+  label.className = 'row-label';
+  label.textContent = line.label;
+  left.append(caret, label);
+  top.append(left);
+
+  if (line.note && !collapsed) {
+    const n = document.createElement('span');
+    n.className = 'row-value note';
+    n.textContent = line.note;
+    top.append(n);
+  }
+  top.addEventListener('click', () => {
+    const next = !isChartCollapsed(providerId);
+    if (typeof prefs.chartCollapsed !== 'object' || prefs.chartCollapsed === null) {
+      prefs.chartCollapsed = {};
+    }
+    prefs.chartCollapsed[providerId] = next;
+    window.workieTokey.setChartCollapsed(providerId, next);
+    if (lastState) render(lastState);
+    reportSize();
+  });
+  div.append(top);
+
+  if (!collapsed) {
+    const chart = document.createElement('div');
+    chart.className = 'barchart';
+    const max = Math.max(1, ...line.points.map((p) => p.value));
+    for (const p of line.points) {
+      const col = document.createElement('div');
+      col.className = 'barchart-col';
+      const bar = document.createElement('div');
+      bar.className = 'barchart-bar';
+      bar.style.background = accent;
+      bar.style.height = `${Math.round((p.value / max) * 100)}%`;
+      bar.title = p.valueLabel || String(p.value);
+      const cap = document.createElement('span');
+      cap.className = 'barchart-cap';
+      cap.textContent = p.label;
+      col.append(bar, cap);
+      chart.append(col);
+    }
+    div.append(chart);
+  }
+  return div;
+}
+
+function renderProviderError(p) {
+  const div = document.createElement('div');
+  div.className = 'row';
+  const top = document.createElement('div');
+  top.className = 'row-top';
+  const label = document.createElement('span');
+  label.className = 'row-label dim';
+  label.textContent = p.label;
+  const note = document.createElement('span');
+  note.className = 'row-value note';
+  note.textContent = p.errorNote || '연결 안 됨';
+  top.append(label, note);
+  div.append(top);
+  const gauge = document.createElement('div');
+  gauge.className = 'gauge';
+  const fill = document.createElement('div');
+  fill.className = 'gauge-fill';
+  gauge.append(fill);
+  div.append(gauge);
+  return div;
 }
 
 function render(state) {
   lastState = state;
-  const rows = buildRows(state);
+  const dark = isDark();
+  const nodes = [];
 
-  rowsEl.replaceChildren(...rows.map((row) => {
-    const div = document.createElement('div');
-    div.className = 'row';
+  for (const p of state.providers || []) {
+    const accent = p.accent || 'var(--text-sub)';
+    const accentText = dark ? (p.accentTextDark || accent) : (p.accentText || accent);
 
-    const top = document.createElement('div');
-    top.className = 'row-top';
-
-    const label = document.createElement('span');
-    label.className = 'row-label' + (row.dim ? ' dim' : '');
-    label.textContent = row.label;
-
-    const value = document.createElement('span');
-    value.className = 'row-value';
-    if (row.percent !== null) {
-      const pct = document.createElement('span');
-      pct.className = `pct ${colorClass(row)}`;
-      pct.textContent = T('pctLeft', { pct: Math.round(row.percent) });
-      value.append(pct);
+    if (p.error) {
+      nodes.push(renderProviderError(p));
+      continue;
     }
-    const note = document.createElement('span');
-    note.className = 'note';
-    note.textContent = (row.percent !== null ? ' · ' : '') + row.note;
-    value.append(note);
-
-    top.append(label, value);
-    div.append(top);
-
-    const gauge = document.createElement('div');
-    gauge.className = 'gauge';
-    const fill = document.createElement('div');
-    fill.className = `gauge-fill ${colorClass(row)}`;
-    fill.style.width = `${Math.min(100, Math.max(0, row.percent ?? 0))}%`;
-    gauge.append(fill);
-    div.append(gauge);
-
-    return div;
-  }));
-
-  const cx = state && state.codex;
-  const cl = state && state.claude;
-  const claudeLive = cl && !cl.error;
-  const codexLive = cx && cx.realtime;
-  let footer;
-  if (claudeLive && codexLive) {
-    footer = T('realtime');
-  } else {
-    const parts = [];
-    if (claudeLive) parts.push(T('nameRealtime', { name: 'Claude' }));
-    if (cx) parts.push(codexLive ? T('nameRealtime', { name: 'Codex' }) : `Codex ${fmtAgo(cx.fileMtimeMs)}`);
-    footer = parts.length > 0 ? parts.join(' · ') : T('searching');
+    for (const line of p.lines || []) {
+      if (line.type === 'progress') {
+        nodes.push(renderProgress(line, accent, accentText, !PRIMARY_KEYS.has(line.key)));
+      } else if (line.type === 'text') {
+        nodes.push(renderText(line));
+      } else if (line.type === 'badge') {
+        nodes.push(renderBadge(line, accentText));
+      } else if (line.type === 'barChart') {
+        if (prefs.showChart) nodes.push(renderBarChart(line, accent, p.id));
+      }
+    }
   }
-  footerEl.textContent = footer;
 
-  renderChip(rows);
+  rowsEl.replaceChildren(...nodes);
+  footerEl.textContent = buildFooter(state);
+  renderChip(state, dark);
 }
 
-// 컴팩트 모드에는 5시간 윈도우만 표시
-function renderChip(rows) {
-  const visible = rows.filter((r) => r.percent !== null && !r.weekly);
+function buildFooter(state) {
+  const ps = (state.providers || []).filter((p) => !p.error);
+  if (ps.length === 0) return '소스를 찾는 중...';
+  if (ps.every((p) => p.realtime)) return '실시간 갱신';
+  const parts = ps.map((p) => {
+    if (p.realtime) return `${p.label} 실시간`;
+    if (p.fileMtimeMs) return `${p.label} ${fmtAgo(p.fileMtimeMs)}`;
+    return `${p.label}`;
+  });
+  return parts.join(' · ');
+}
+
+// 컴팩트 모드: 프로바이더별 첫 progress(5h) 라인만 표시
+function renderChip(state, dark) {
   const items = [];
-  visible.forEach((row, i) => {
-    if (i > 0) {
+  let first = true;
+  for (const p of state.providers || []) {
+    if (p.error) continue;
+    const line = (p.lines || []).find((l) => l.type === 'progress' && l.remainingPercent !== null);
+    if (!line) continue;
+
+    if (!first) {
       const sep = document.createElement('span');
       sep.className = 'chip-sep';
       items.push(sep);
     }
+    first = false;
+
+    const warn = isWarn(line.remainingPercent);
+    const color = warn ? 'var(--warn)' : p.accent;
+    const txtColor = warn ? 'var(--warn-text)' : (dark ? p.accentTextDark : p.accentText);
+
     const item = document.createElement('span');
     item.className = 'chip-item';
     const dot = document.createElement('span');
-    dot.className = `chip-dot ${colorClass(row)}`;
+    dot.className = 'chip-dot';
+    dot.style.background = color;
     const text = document.createElement('span');
-    text.textContent = row.label;
+    text.textContent = p.label;
     const pct = document.createElement('span');
-    pct.className = `pct ${colorClass(row)}`;
-    pct.textContent = `${Math.round(row.percent)}%`;
+    pct.className = 'pct';
+    pct.style.color = txtColor;
+    pct.textContent = `${Math.round(line.remainingPercent)}%`;
     item.append(dot, text, pct);
     items.push(item);
-  });
+  }
   if (items.length === 0) {
     const empty = document.createElement('span');
-    empty.textContent = T('noData');
+    empty.textContent = '데이터 없음';
     items.push(empty);
   }
   chipItemsEl.replaceChildren(...items);
@@ -215,33 +317,62 @@ function applyMode(mode) {
 document.getElementById('toggle-card').addEventListener('click', () => window.workieTokey.toggleMode());
 document.getElementById('toggle-chip').addEventListener('click', () => window.workieTokey.toggleMode());
 document.getElementById('toggle-theme').addEventListener('click', () => window.workieTokey.toggleTheme());
-document.getElementById('open-settings').addEventListener('click', () => window.workieTokey.openSettings());
 
-// 버튼 툴팁 등 정적 텍스트에 현재 언어 반영
-function applyLang() {
-  document.getElementById('toggle-theme').title = T('themeToggleTitle');
-  document.getElementById('open-settings').title = T('settingsBtnTitle');
-  document.getElementById('toggle-card').title = T('compactTitle');
-  document.getElementById('toggle-chip').title = T('cardTitle');
-  if (!lastState) footerEl.textContent = T('waiting');
+// ── 설정 패널 ───────────────────────────────────────────
+const settingsEl = document.getElementById('settings');
+const showChartRow = document.getElementById('set-show-chart');
+const autostartRow = document.getElementById('set-autostart');
+
+function applySwitch(row, on) {
+  row.classList.toggle('on', !!on);
 }
 
-window.workieTokey.onSettingsUpdated((payload) => {
-  prefs = payload.settings;
-  lang = payload.language;
-  applyLang();
-  if (lastState) render(lastState);
+async function openSettings() {
+  const s = await window.workieTokey.getSettings();
+  applySwitch(showChartRow, s.showChart);
+  applySwitch(autostartRow, s.autostart);
+  cardEl.classList.add('settings-open');
+  settingsEl.classList.remove('hidden');
+  reportSize();
+}
+
+function closeSettings() {
+  cardEl.classList.remove('settings-open');
+  settingsEl.classList.add('hidden');
+  reportSize();
+}
+
+document.getElementById('open-settings').addEventListener('click', () => {
+  if (cardEl.classList.contains('settings-open')) closeSettings();
+  else openSettings();
 });
 
-applyLang();
+showChartRow.addEventListener('click', () => {
+  const on = !showChartRow.classList.contains('on');
+  applySwitch(showChartRow, on);
+  window.workieTokey.setShowChart(on);
+});
+autostartRow.addEventListener('click', () => {
+  const on = !autostartRow.classList.contains('on');
+  applySwitch(autostartRow, on);
+  window.workieTokey.setAutostart(on);
+});
+document.getElementById('set-refresh').addEventListener('click', () => {
+  window.workieTokey.refreshNow();
+  closeSettings();
+});
+document.getElementById('set-reset-pos').addEventListener('click', () => window.workieTokey.resetPosition());
+document.getElementById('set-quit').addEventListener('click', () => window.workieTokey.quitApp());
 
-// 보이는 요소(카드/칩)의 실제 크기를 메인에 보고 → 창이 내용에 딱 맞게 줄어듦
 function reportSize() {
   const el = chipEl.classList.contains('hidden') ? cardEl : chipEl;
   const r = el.getBoundingClientRect();
-  if (r.width > 0 && r.height > 0) {
-    // 요소의 2px 바깥 여백까지 포함
-    window.workieTokey.reportSize(r.width + 4, r.height + 4);
+  // 내용이 넘칠 때(예: 칩에 소스가 늘어 토글 버튼이 잘리는 경우)를 대비해
+  // 측정값과 scroll 크기 중 큰 값을 쓴다 → 창이 항상 내용 전체를 담는다
+  const w = Math.max(r.width, el.scrollWidth);
+  const h = Math.max(r.height, el.scrollHeight);
+  if (w > 0 && h > 0) {
+    window.workieTokey.reportSize(w + 4, h + 4);
   }
 }
 
@@ -254,8 +385,12 @@ window.workieTokey.onMode((mode) => {
   applyMode(mode);
   reportSize();
 });
+window.workieTokey.onPrefs((p) => {
+  prefs = p;
+  if (lastState) render(lastState);
+  reportSize();
+});
 
-// 폰트 로드 후 reflow까지 잡기 위해 한 번 더
 if (document.fonts && document.fonts.ready) {
   document.fonts.ready.then(reportSize);
 }
