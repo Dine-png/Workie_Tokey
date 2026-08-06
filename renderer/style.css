@@ -74,9 +74,15 @@ html, body {
 }
 
 .logo {
+  -webkit-app-region: no-drag;
   color: var(--text-sub);
   letter-spacing: 0.3px;
+  padding: 3px 4px;
+  margin: -3px -4px;
+  border-radius: 4px;
+  cursor: pointer;
 }
+.logo:hover, .logo:focus-visible { color: var(--text); background: var(--hairline); outline: none; }
 
 .header-buttons {
   display: flex;
@@ -275,7 +281,7 @@ html, body {
 
 /* ── 컴팩트 칩 ──────────────────────────────────────── */
 .chip {
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
   display: inline-flex;
   align-items: center;
   width: max-content;
@@ -284,7 +290,10 @@ html, body {
   border: 1px solid var(--border);
   border-radius: 7px;
   padding: 7px 9px 7px 12px;
+  cursor: pointer;
 }
+.chip:focus-visible { outline: 1px solid var(--text-hint); outline-offset: -3px; }
+.chip.dragging, .chip.dragging * { cursor: grabbing; }
 
 #chip-items {
   display: inline-flex;

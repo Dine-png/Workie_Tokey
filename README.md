@@ -31,6 +31,7 @@ npm run dist
 ## 조작
 
 - **드래그**: 카드를 잡아 이동 (위치 자동 저장)
+- 다시 실행하면 기존 워키토키를 종료하고 새 인스턴스로 교체하며, 마지막 위치에서 다시 열린다.
 - **카드 우상단 버튼 2개**:
   - `◐` 라이트/다크 테마 전환 (저장됨, 기본은 OS 따라감)
   - `▾` 카드 ↔ 컴팩트 칩 모드 전환
@@ -50,6 +51,7 @@ HTTP API 수정 없이 새 소스가 추가된다. `probe()` 는 정규화된 *�
 - **Claude**: `api.anthropic.com/api/oauth/usage` (Claude Code의 `/usage`와 동일).
   5시간·주간 + (소진 시) Opus/Sonnet 주간, 그리고 로컬 로그 기반 **최근 7일 토큰 추이 차트**.
 - **Codex**: `chatgpt.com/backend-api/wham/usage` (실시간), 실패 시 세션 로그 폴백.
+  서버가 알려 주는 실제 제한 기간을 읽어 현재 주간 한도 등으로 자동 표기한다.
 - **Gemini**: `~/.gemini/oauth_creds.json`(Gemini CLI 로그인) → 토큰 갱신 후
   `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota`. 모델별 요청 쿼터(`remainingFraction`).
 

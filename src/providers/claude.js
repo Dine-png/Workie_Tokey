@@ -41,7 +41,12 @@ function saveCredFile(full) {
   fs.writeFileSync(CRED_PATH, JSON.stringify(full));
 }
 
+// 마지막 refresh 실패 사유. 'expired'면 리프레시 토큰 자체가 만료된 것이라
+// 재로그인 말고는 방법이 없다 — 사용자에게 그대로 알려 준다.
+let lastRefreshFailure = null;
+
 async function refreshToken(oauth) {
+  lastRefreshFailure = null;
   for (const url of TOKEN_ENDPOINTS) {
     try {
       const res = await fetch(url, {
@@ -53,7 +58,14 @@ async function refreshToken(oauth) {
           client_id: CLIENT_ID
         })
       });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        // invalid_grant = 리프레시 토큰 만료/폐기. 다른 엔드포인트도 마찬가지다.
+        try {
+          const err = await res.json();
+          if (err && err.error === 'invalid_grant') lastRefreshFailure = 'expired';
+        } catch {}
+        continue;
+      }
       const j = await res.json();
       if (!j.access_token) continue;
       return {
@@ -75,7 +87,10 @@ let refreshInFlight = null;
 async function getAccessToken() {
   const full = loadCredFile();
   const oauth = full && full.claudeAiOauth;
-  if (!oauth || !oauth.refreshToken) return null;
+  if (!oauth || !oauth.refreshToken) {
+    lastRefreshFailure = null;
+    return null;
+  }
 
   if (oauth.accessToken && oauth.expiresAt && oauth.expiresAt > Date.now() + 60 * 1000) {
     return oauth.accessToken;
@@ -116,7 +131,7 @@ function getLastRaw() {
 
 async function fetchUsage() {
   const token = await getAccessToken();
-  if (!token) return { error: 'auth' };
+  if (!token) return { error: lastRefreshFailure === 'expired' ? 'auth_expired' : 'auth' };
   const res = await fetch(USAGE_URL, {
     headers: {
       'Authorization': `Bearer ${token}`,
@@ -136,10 +151,11 @@ async function probe() {
   try {
     const { error, json } = await fetchUsage();
     if (error) {
-      result = base({
-        error,
-        errorNote: error === 'auth' ? '로그인 필요 (claude /login)' : '연결 안 됨'
-      });
+      let errorNote = '연결 안 됨';
+      if (error === 'auth') errorNote = '로그인 필요 (claude /login)';
+      else if (error === 'auth_expired') errorNote = '로그인 만료 — claude /login';
+      else if (error === 'http_401') errorNote = '인증 거부 — claude /login';
+      result = base({ error, errorNote });
     } else {
       lastRaw = json;
       const lines = [];

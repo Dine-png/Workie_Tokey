@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen, Notification, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { execFileSync } = require('child_process');
 const registry = require('./providers');
 const httpapi = require('./httpapi');
 const { makeTrayPng } = require('./trayicon');
@@ -17,6 +18,9 @@ let tray = null;
 let pollTimer = null;
 let apiServer = null;
 let latestState = null; // 로컬 HTTP API가 노출하는 최신 스냅샷
+let compactDrag = null;
+let applyingLayout = 0;
+let replacementScheduled = false;
 
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json');
 
@@ -36,6 +40,59 @@ function saveSettings(patch) {
   return next;
 }
 
+// 창은 아래 모서리를 고정점으로 삼아 위로 자란다. 그래서 위치를 저장할 때
+// 좌상단뿐 아니라 아래 모서리(bottom)도 같이 남겨, 다시 켰을 때 기본 크기로
+// 열렸다가 내용 크기로 커져도 아래 모서리가 제자리에 있게 한다.
+function rememberPosition() {
+  if (!win || win.isDestroyed()) return;
+  const b = win.getBounds();
+  saveSettings({ x: b.x, y: b.y, bottom: b.y + b.height });
+}
+
+// 단일 인스턴스 잠금을 사용하지 않던 구버전이 이미 실행 중이어도 새 버전이
+// 자리를 넘겨받을 수 있도록, 현재 메인 프로세스를 제외한 구형 최상위 프로세스만 종료한다.
+function stopLegacyInstances() {
+  if (process.platform !== 'win32') return;
+  const script = [
+    `$currentPid = ${process.pid}`,
+    "$targets = Get-CimInstance Win32_Process -Filter \"Name = 'WorkieTokey.exe'\" | Where-Object { $_.ProcessId -ne $currentPid -and $_.CommandLine -notmatch '--type=' }",
+    "$targets | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+  ].join('; ');
+  try {
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      stdio: 'ignore',
+      timeout: 5000
+    });
+  } catch {}
+}
+
+function currentLaunchSpec() {
+  const portablePath = process.env.PORTABLE_EXECUTABLE_FILE;
+  if (portablePath && path.isAbsolute(portablePath)) {
+    return { execPath: portablePath, args: [] };
+  }
+  return {
+    execPath: process.execPath,
+    args: process.defaultApp ? process.argv.slice(1) : []
+  };
+}
+
+function replacementData() {
+  return { workieTokeyReplacement: true, ...currentLaunchSpec() };
+}
+
+function restartWithReplacement(data) {
+  if (replacementScheduled || !data || data.workieTokeyReplacement !== true) return;
+  if (typeof data.execPath !== 'string' || !path.isAbsolute(data.execPath) || !fs.existsSync(data.execPath)) return;
+  const args = Array.isArray(data.args) && data.args.every((arg) => typeof arg === 'string') ? data.args : [];
+
+  replacementScheduled = true;
+  rememberPosition();
+  app.relaunch({ execPath: data.execPath, args });
+  app.quit();
+}
+
 function defaultPosition(size) {
   const { workArea } = screen.getPrimaryDisplay();
   return {
@@ -44,31 +101,22 @@ function defaultPosition(size) {
   };
 }
 
-// 현재 위치를 기준으로, 새 크기로 바뀔 때 화면 안쪽으로 펴지도록 좌표 계산.
-// 창이 화면 어느 사분면에 있는지 보고 가까운 모서리를 고정점으로 삼는다.
-function anchoredBounds(width, height) {
-  const b = win.getBounds();
-  const wa = screen.getDisplayMatching(b).workArea;
-  const centerX = b.x + b.width / 2;
-  const centerY = b.y + b.height / 2;
-
-  // 왼쪽 절반이면 왼쪽 고정(오른쪽으로 펴짐), 오른쪽이면 오른쪽 고정
-  let x = centerX < wa.x + wa.width / 2 ? b.x : b.x + b.width - width;
-  // 위쪽 절반이면 위 고정(아래로 펴짐), 아래쪽이면 아래 고정(위로 펴짐)
-  let y = centerY < wa.y + wa.height / 2 ? b.y : b.y + b.height - height;
-
-  // 안전하게 작업영역 안으로 클램프
-  x = Math.max(wa.x, Math.min(x, wa.x + wa.width - width));
-  y = Math.max(wa.y, Math.min(y, wa.y + wa.height - height));
-  return { x, y, width, height };
+// 작업표시줄 위에 둔 좌표도 그대로 복원한다. 모니터 구성이 바뀐 경우에만
+// 최소한의 손잡이 영역을 화면 안에 남겨 다시 끌어올 수 있게 한다.
+function restorePosition(x, y, width, height) {
+  const bounds = screen.getDisplayNearestPoint({ x, y }).bounds;
+  const visible = 32;
+  return {
+    x: Math.max(bounds.x - width + visible, Math.min(x, bounds.x + bounds.width - visible)),
+    y: Math.max(bounds.y - height + visible, Math.min(y, bounds.y + bounds.height - visible))
+  };
 }
 
-function clampToWorkArea(x, y, width, height) {
-  const wa = screen.getDisplayNearestPoint({ x, y }).workArea;
-  return {
-    x: Math.max(wa.x, Math.min(x, wa.x + wa.width - width)),
-    y: Math.max(wa.y, Math.min(y, wa.y + wa.height - height))
-  };
+function keepWindowOnTop(force = false) {
+  if (!win || win.isDestroyed()) return;
+  if (force || !win.isAlwaysOnTop()) {
+    win.setAlwaysOnTop(true, 'screen-saver', 1);
+  }
 }
 
 function currentMode() {
@@ -101,7 +149,7 @@ function resetPosition() {
   const b = win.getBounds();
   const pos = defaultPosition(b);
   win.setBounds({ ...pos, width: b.width, height: b.height });
-  saveSettings(pos);
+  saveSettings({ ...pos, bottom: pos.y + b.height });
 }
 
 function sendPrefs() {
@@ -114,7 +162,12 @@ function createWindow() {
   const size = SIZES[mode];
   const settings = loadSettings();
   const pos = Number.isFinite(settings.x) && Number.isFinite(settings.y)
-    ? clampToWorkArea(settings.x, settings.y, size.width, size.height)
+    ? restorePosition(
+        settings.x,
+        Number.isFinite(settings.bottom) ? settings.bottom - size.height : settings.y,
+        size.width,
+        size.height
+      )
     : defaultPosition(size);
 
   win = new BrowserWindow({
@@ -135,14 +188,27 @@ function createWindow() {
     }
   });
 
-  win.setAlwaysOnTop(true, 'screen-saver');
+  keepWindowOnTop(true);
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.setMenu(null);
-  win.setIcon(nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'icon.png')));
+  // 작업표시줄/Alt-Tab 아이콘은 exe에 내장된 다중 해상도 ICO를 그대로 쓴다.
+  // setIcon으로 256px PNG를 넘기면 Windows가 작은 크기로 축소하면서
+  // 픽셀아트가 뭉개진다.
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
   win.on('moved', () => {
-    const [x, y] = win.getPosition();
-    saveSettings({ x, y });
+    if (applyingLayout || compactDrag) return;
+    rememberPosition();
+  });
+  win.on('close', rememberPosition);
+
+  // Windows에서 다른 창이나 가상 데스크톱 전환 후 최상위 레벨이 풀리는
+  // 경우를 복구한다. 포커스를 빼앗지는 않는다.
+  win.on('show', () => keepWindowOnTop(true));
+  win.on('restore', () => keepWindowOnTop(true));
+  win.on('blur', () => keepWindowOnTop(true));
+  win.on('always-on-top-changed', (_event, isAlwaysOnTop) => {
+    if (!isAlwaysOnTop) setImmediate(() => keepWindowOnTop(true));
   });
 
   win.webContents.on('did-finish-load', () => {
@@ -195,12 +261,12 @@ function checkAlerts(state) {
 }
 
 // 트레이에서도 간략화된 잔량이 보이게: 아이콘 게이지 = 가장 적게 남은 윈도우,
-// 툴팁 = 소스별 5시간 잔량 텍스트
+// 툴팁 = 소스별 대표 사용량 창의 잔량 텍스트
 function updateTray(state) {
   if (!tray) return;
   const all = progressLines(state);
 
-  // 툴팁: 프로바이더별 첫 progress 라인(보통 5시간 윈도우) 잔량
+  // 툴팁: 프로바이더별 첫 progress 라인 잔량
   const seen = new Set();
   const parts = [];
   for (const { provider, line } of all) {
@@ -235,7 +301,9 @@ function setMode(mode) {
   buildTrayMenu();
 }
 
-// 렌더러가 측정한 내용 크기에 맞춰 창을 줄이고, 화면 안쪽으로 펴지게 재배치
+// 렌더러가 측정한 내용 크기에 맞춰 창 크기를 바꾼다. 왼쪽과 **아래** 모서리를
+// 고정점으로 삼아, 카드가 펼쳐질 때 아래가 아니라 위로 자라게 한다.
+// (왼쪽/아래 고정은 결정적이라 갱신마다 창이 떠다니지 않는다.)
 function applyContentSize(width, height) {
   if (!win || win.isDestroyed()) return;
   width = Math.ceil(width);
@@ -243,9 +311,16 @@ function applyContentSize(width, height) {
   if (width < 40 || height < 20) return;
   const b = win.getBounds();
   if (b.width === width && b.height === height) return;
-  const next = anchoredBounds(width, height);
-  win.setBounds(next);
-  saveSettings({ x: next.x, y: next.y });
+
+  let y = b.y + b.height - height;
+  // 위로 자라다 화면 밖으로 나가면 화면 상단에서 멈춘다
+  const screenTop = screen.getDisplayMatching(b).bounds.y;
+  if (y < screenTop) y = screenTop;
+
+  applyingLayout += 1;
+  win.setBounds({ x: b.x, y, width, height });
+  setImmediate(() => { applyingLayout = Math.max(0, applyingLayout - 1); });
+  saveSettings({ x: b.x, y, bottom: y + height });
 }
 
 function loginItemArgs() {
@@ -311,6 +386,27 @@ ipcMain.on('content-size', (_event, size) => {
   applyContentSize(size.width, size.height);
 });
 
+// 컴팩트 모드는 전체 영역이 클릭 대상이므로 네이티브 drag region 대신
+// 클릭과 드래그를 구분하는 작은 커스텀 드래그 경로를 쓴다.
+ipcMain.on('start-window-drag', () => {
+  if (!win || win.isDestroyed()) return;
+  const [x, y] = win.getPosition();
+  compactDrag = { x, y };
+});
+
+ipcMain.on('move-window-drag', (_event, delta) => {
+  if (!win || win.isDestroyed() || !compactDrag) return;
+  const dx = Number.isFinite(delta.dx) ? Math.round(delta.dx) : 0;
+  const dy = Number.isFinite(delta.dy) ? Math.round(delta.dy) : 0;
+  win.setPosition(compactDrag.x + dx, compactDrag.y + dy, false);
+});
+
+ipcMain.on('end-window-drag', () => {
+  if (!win || win.isDestroyed() || !compactDrag) return;
+  compactDrag = null;
+  rememberPosition();
+});
+
 ipcMain.on('toggle-theme', () => {
   const next = nativeTheme.shouldUseDarkColors ? 'light' : 'dark';
   nativeTheme.themeSource = next;
@@ -344,18 +440,33 @@ ipcMain.on('quit-app', () => app.quit());
 
 app.setAppUserModelId('com.workietokey.app');
 
-app.whenReady().then(() => {
-  const savedTheme = loadSettings().theme;
-  if (savedTheme === 'light' || savedTheme === 'dark') {
-    nativeTheme.themeSource = savedTheme;
-  }
-  createWindow();
-  createTray();
-  pollTimer = setInterval(tick, POLL_MS);
-  if (loadSettings().httpApi !== false) {
-    apiServer = httpapi.start(() => latestState);
-  }
-});
+const hasSingleInstanceLock = app.requestSingleInstanceLock(replacementData());
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, _commandLine, _workingDirectory, data) => {
+    restartWithReplacement(data);
+  });
+
+  app.whenReady().then(() => {
+    // requestSingleInstanceLock을 사용하지 않는 설치본이 남아 있다면 여기서 종료한다.
+    stopLegacyInstances();
+
+    const savedTheme = loadSettings().theme;
+    if (savedTheme === 'light' || savedTheme === 'dark') {
+      nativeTheme.themeSource = savedTheme;
+    }
+    createWindow();
+    createTray();
+    pollTimer = setInterval(tick, POLL_MS);
+    if (loadSettings().httpApi !== false) {
+      apiServer = httpapi.start(() => latestState);
+    }
+  });
+}
+
+app.on('before-quit', rememberPosition);
 
 app.on('window-all-closed', () => {
   clearInterval(pollTimer);

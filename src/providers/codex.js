@@ -33,13 +33,27 @@ function loadAuth() {
   }
 }
 
+function windowSeconds(w) {
+  if (!w) return null;
+  if (typeof w.limit_window_seconds === 'number') return w.limit_window_seconds;
+  if (typeof w.window_seconds === 'number') return w.window_seconds;
+  if (typeof w.limit_window_minutes === 'number') return w.limit_window_minutes * 60;
+  if (typeof w.window_minutes === 'number') return w.window_minutes * 60;
+  return null;
+}
+
 function apiWindowRemaining(w) {
   if (!w || typeof w.used_percent !== 'number') return null;
   let resetsAt = w.reset_at ?? w.resets_at ?? null;
   if (resetsAt === null && typeof w.reset_after_seconds === 'number') {
     resetsAt = Math.floor(Date.now() / 1000) + w.reset_after_seconds;
   }
-  return { remainingPercent: 100 - w.used_percent, resetsAt, inferredReset: false };
+  return {
+    remainingPercent: 100 - w.used_percent,
+    resetsAt,
+    inferredReset: false,
+    windowSeconds: windowSeconds(w)
+  };
 }
 
 async function fetchUsageApi() {
@@ -113,7 +127,8 @@ function logWindowRemaining(w) {
   return {
     remainingPercent: resetPassed ? 100 : 100 - w.used_percent,
     resetsAt: resetPassed ? null : resetsAt,
-    inferredReset: resetPassed
+    inferredReset: resetPassed,
+    windowSeconds: windowSeconds(w)
   };
 }
 
@@ -149,6 +164,43 @@ function windowNote(w, prefix) {
   return prefix || '';
 }
 
+// API의 primary/secondary 이름은 기간을 뜻하지 않는다. 실제 기간 필드를
+// 읽어 5시간, 주간 등 서버가 현재 제공하는 양식에 맞춰 표시한다.
+function windowDisplay(w, fallback) {
+  const seconds = w && w.windowSeconds;
+  const hour = 60 * 60;
+  const day = 24 * hour;
+
+  if (Number.isFinite(seconds)) {
+    if (seconds >= 6 * day && seconds <= 8 * day) {
+      return { key: fallback === 'primary' ? 'main' : 'week', label: 'Codex 주간', note: '' };
+    }
+    if (seconds >= day && seconds % day === 0) {
+      const days = Math.round(seconds / day);
+      return { key: fallback === 'primary' ? 'main' : `${days}d`, label: `Codex ${days}일`, note: '' };
+    }
+    if (seconds >= hour && seconds % hour === 0) {
+      const hours = Math.round(seconds / hour);
+      return { key: `${hours}h`, label: 'Codex', note: `${hours}시간` };
+    }
+  }
+
+  return fallback === 'secondary'
+    ? { key: 'week', label: 'Codex 주간', note: '' }
+    : { key: 'main', label: 'Codex', note: '' };
+}
+
+function progressLine(w, fallback) {
+  const display = windowDisplay(w, fallback);
+  return L.progress({
+    key: display.key,
+    label: display.label,
+    remainingPercent: w.remainingPercent,
+    resetsAt: w.resetsAt,
+    note: windowNote(w, display.note)
+  });
+}
+
 async function probe() {
   if (cache.data && Date.now() - cache.at < CACHE_MS) return cache.data;
 
@@ -164,20 +216,10 @@ async function probe() {
   } else {
     const lines = [];
     if (raw.primary) {
-      lines.push(L.progress({
-        key: '5h', label: 'Codex',
-        remainingPercent: raw.primary.remainingPercent,
-        resetsAt: raw.primary.resetsAt,
-        note: windowNote(raw.primary, '5h')
-      }));
+      lines.push(progressLine(raw.primary, 'primary'));
     }
     if (raw.secondary) {
-      lines.push(L.progress({
-        key: 'week', label: 'Codex 주간',
-        remainingPercent: raw.secondary.remainingPercent,
-        resetsAt: raw.secondary.resetsAt,
-        note: windowNote(raw.secondary, '')
-      }));
+      lines.push(progressLine(raw.secondary, 'secondary'));
     }
     // 최근 7일 토큰 사용 추이 (로컬 세션 로그 집계, 15분 캐시)
     try {

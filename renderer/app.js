@@ -269,7 +269,7 @@ function buildFooter(state) {
   return parts.join(' · ');
 }
 
-// 컴팩트 모드: 프로바이더별 첫 progress(5h) 라인만 표시
+// 컴팩트 모드: 프로바이더별 대표 progress 라인만 표시
 function renderChip(state, dark) {
   const items = [];
   let first = true;
@@ -295,7 +295,7 @@ function renderChip(state, dark) {
     dot.className = 'chip-dot';
     dot.style.background = color;
     const text = document.createElement('span');
-    text.textContent = p.label;
+    text.textContent = line.label || p.label;
     const pct = document.createElement('span');
     pct.className = 'pct';
     pct.style.color = txtColor;
@@ -318,8 +318,55 @@ function applyMode(mode) {
 }
 
 document.getElementById('toggle-card').addEventListener('click', () => window.workieTokey.toggleMode());
-document.getElementById('toggle-chip').addEventListener('click', () => window.workieTokey.toggleMode());
 document.getElementById('toggle-theme').addEventListener('click', () => window.workieTokey.toggleTheme());
+
+const collapseTitleEl = document.getElementById('collapse-title');
+collapseTitleEl.addEventListener('click', () => window.workieTokey.toggleMode());
+collapseTitleEl.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    window.workieTokey.toggleMode();
+  }
+});
+
+// 컴팩트 칩은 짧게 누르면 어디서든 확대되고, 일정 거리 이상 끌면
+// 기존처럼 위치를 옮긴다.
+let chipPointer = null;
+chipEl.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) return;
+  chipPointer = { id: event.pointerId, x: event.screenX, y: event.screenY, moved: false };
+  chipEl.setPointerCapture(event.pointerId);
+  window.workieTokey.startWindowDrag();
+});
+chipEl.addEventListener('pointermove', (event) => {
+  if (!chipPointer || event.pointerId !== chipPointer.id) return;
+  const dx = event.screenX - chipPointer.x;
+  const dy = event.screenY - chipPointer.y;
+  if (!chipPointer.moved && Math.hypot(dx, dy) < 4) return;
+  chipPointer.moved = true;
+  chipEl.classList.add('dragging');
+  window.workieTokey.moveWindowDrag(dx, dy);
+});
+function finishChipPointer(event, expand) {
+  if (!chipPointer || event.pointerId !== chipPointer.id) return;
+  const moved = chipPointer.moved;
+  chipPointer = null;
+  chipEl.classList.remove('dragging');
+  window.workieTokey.endWindowDrag();
+  if (expand && !moved) window.workieTokey.toggleMode();
+}
+chipEl.addEventListener('pointerup', (event) => finishChipPointer(event, true));
+chipEl.addEventListener('pointercancel', (event) => finishChipPointer(event, false));
+chipEl.addEventListener('keydown', (event) => {
+  if (event.target !== chipEl || (event.key !== 'Enter' && event.key !== ' ')) return;
+  event.preventDefault();
+  window.workieTokey.toggleMode();
+});
+// 포커스된 화살표 버튼의 키보드 활성화는 유지하되 포인터 클릭은 위의
+// 칩 전체 처리기가 한 번만 담당한다.
+document.getElementById('toggle-chip').addEventListener('click', (event) => {
+  if (event.detail === 0) window.workieTokey.toggleMode();
+});
 
 // ── 설정 패널 ───────────────────────────────────────────
 const settingsEl = document.getElementById('settings');
