@@ -7,6 +7,7 @@ const httpapi = require('./httpapi');
 const { makeTrayPng } = require('./trayicon');
 
 const POLL_MS = 30 * 1000;
+const TOPMOST_MS = 2 * 1000;
 // 초기 추정 크기 — 렌더러가 실제 내용 크기를 측정해 즉시 보정한다
 const SIZES = {
   card: { width: 316, height: 206 },
@@ -16,6 +17,7 @@ const SIZES = {
 let win = null;
 let tray = null;
 let pollTimer = null;
+let topmostTimer = null;
 let apiServer = null;
 let latestState = null; // 로컬 HTTP API가 노출하는 최신 스냅샷
 let compactDrag = null;
@@ -112,11 +114,18 @@ function restorePosition(x, y, width, height) {
   };
 }
 
+// Windows 셸(특히 작업표시줄)이나 다른 최상위 창이 z-order를 다시 잡아가면
+// 오버레이가 가려진다. isAlwaysOnTop()은 여전히 true를 반환하므로 플래그만
+// 봐서는 감지할 수 없다. 그래서 주기적으로 최상위를 다시 선언하고 moveTop()으로
+// 실제 z-order 맨 위까지 올린다. 둘 다 포커스는 빼앗지 않는다.
 function keepWindowOnTop(force = false) {
   if (!win || win.isDestroyed()) return;
   if (force || !win.isAlwaysOnTop()) {
     win.setAlwaysOnTop(true, 'screen-saver', 1);
   }
+  try {
+    win.moveTop();
+  } catch {}
 }
 
 function currentMode() {
@@ -210,6 +219,9 @@ function createWindow() {
   win.on('always-on-top-changed', (_event, isAlwaysOnTop) => {
     if (!isAlwaysOnTop) setImmediate(() => keepWindowOnTop(true));
   });
+
+  clearInterval(topmostTimer);
+  topmostTimer = setInterval(() => keepWindowOnTop(true), TOPMOST_MS);
 
   win.webContents.on('did-finish-load', () => {
     win.webContents.send('mode', currentMode());
@@ -470,6 +482,7 @@ app.on('before-quit', rememberPosition);
 
 app.on('window-all-closed', () => {
   clearInterval(pollTimer);
+  clearInterval(topmostTimer);
   if (apiServer) apiServer.close();
   app.quit();
 });
