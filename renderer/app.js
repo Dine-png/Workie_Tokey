@@ -372,6 +372,9 @@ document.getElementById('toggle-chip').addEventListener('click', (event) => {
 const settingsEl = document.getElementById('settings');
 const showChartRow = document.getElementById('set-show-chart');
 const autostartRow = document.getElementById('set-autostart');
+const alwaysOnTopRow = document.getElementById('set-always-on-top');
+const agentModeRow = document.getElementById('set-agent-mode');
+const clickThroughRow = document.getElementById('set-click-through');
 
 function applySwitch(row, on) {
   row.classList.toggle('on', !!on);
@@ -381,6 +384,10 @@ async function openSettings() {
   const s = await window.workieTokey.getSettings();
   applySwitch(showChartRow, s.showChart);
   applySwitch(autostartRow, s.autostart);
+  applySwitch(alwaysOnTopRow, s.alwaysOnTop);
+  applySwitch(agentModeRow, s.agentMode);
+  applySwitch(clickThroughRow, s.clickThrough);
+  clickThroughRow.classList.toggle('disabled', !s.agentMode);
   cardEl.classList.add('settings-open');
   settingsEl.classList.remove('hidden');
   reportSize();
@@ -406,6 +413,68 @@ autostartRow.addEventListener('click', () => {
   const on = !autostartRow.classList.contains('on');
   applySwitch(autostartRow, on);
   window.workieTokey.setAutostart(on);
+});
+alwaysOnTopRow.addEventListener('click', () => {
+  const on = !alwaysOnTopRow.classList.contains('on');
+  applySwitch(alwaysOnTopRow, on);
+  window.workieTokey.setAlwaysOnTop(on);
+});
+agentModeRow.addEventListener('click', () => {
+  const on = !agentModeRow.classList.contains('on');
+  applySwitch(agentModeRow, on);
+  clickThroughRow.classList.toggle('disabled', !on);
+  if (!on) applySwitch(clickThroughRow, false);
+  window.workieTokey.setAgentMode(on);
+});
+clickThroughRow.addEventListener('click', () => {
+  if (clickThroughRow.classList.contains('disabled')) return;
+  const on = !clickThroughRow.classList.contains('on');
+  applySwitch(clickThroughRow, on);
+  window.workieTokey.setClickThrough(on);
+});
+
+// ── 클릭 통과: 포인터가 멈추면 곧바로 조작 허용 ─────────
+// 통과 중에도 forward 옵션 덕분에 mousemove는 들어온다. 예전에는 "창에 들어온
+// 지 0.5초"를 기준으로 삼아서, 그보다 빨리 누르는 사람의 첫 클릭과 드래그
+// 시작이 아래 창으로 새어 나갔다. 이제는 "포인터가 STILL_MS 동안 멈췄는지"를
+// 본다. 사람은 누르기 직전에 손을 멈추므로 사실상 즉시 반응하고, 에이전트는
+// 좌표로 순간 이동한 뒤 곧바로 클릭하므로 통과 상태가 유지된다.
+// 한 번 풀린 뒤에는 창을 벗어날 때까지 계속 조작할 수 있어 드래그가 끊기지 않는다.
+const STILL_MS = 120;
+let clickThrough = false;
+let stillTimer = null;
+let interactive = false;
+
+function setInteractive(on) {
+  if (interactive === on) return;
+  interactive = on;
+  window.workieTokey.setMousePassthrough(!on);
+}
+
+function endInteractive() {
+  clearTimeout(stillTimer);
+  stillTimer = null;
+  setInteractive(false);
+}
+
+document.addEventListener('mousemove', () => {
+  if (!clickThrough || interactive) return;
+  clearTimeout(stillTimer);
+  stillTimer = setTimeout(() => {
+    stillTimer = null;
+    if (clickThrough) setInteractive(true);
+  }, STILL_MS);
+});
+document.addEventListener('mouseleave', endInteractive);
+
+window.workieTokey.onAgentMode((state) => {
+  clickThrough = !!(state && state.clickThrough);
+  document.body.classList.toggle('agent-mode', !!(state && state.agentMode));
+  if (!clickThrough) {
+    clearTimeout(stillTimer);
+    stillTimer = null;
+    interactive = false;
+  }
 });
 document.getElementById('set-refresh').addEventListener('click', () => {
   window.workieTokey.refreshNow();

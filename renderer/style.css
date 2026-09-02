@@ -323,3 +323,7 @@ html, body {
 }
 
 .chip .toggle { margin-left: 8px; font-size: 16px; }
+
+/* 클릭 통과는 에이전트 모드의 하위 옵션 */
+.settings-toggle.sub .settings-label { padding-left: 2px; }
+.settings-toggle.disabled { opacity: 0.4; pointer-events: none; }

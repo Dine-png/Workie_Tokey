@@ -120,12 +120,70 @@ function restorePosition(x, y, width, height) {
 // 실제 z-order 맨 위까지 올린다. 둘 다 포커스는 빼앗지 않는다.
 function keepWindowOnTop(force = false) {
   if (!win || win.isDestroyed()) return;
+  if (!isAlwaysOnTopEnabled()) return;
   if (force || !win.isAlwaysOnTop()) {
     win.setAlwaysOnTop(true, 'screen-saver', 1);
   }
   try {
     win.moveTop();
   } catch {}
+}
+
+// 항상 위 설정. 기본 ON. 끄면 일반 창처럼 다른 창 뒤로 내려갈 수 있어
+// 화면을 캡처하거나 클릭하는 자동화 도구(에이전트 등)를 방해하지 않는다.
+function isAlwaysOnTopEnabled() {
+  return loadSettings().alwaysOnTop !== false;
+}
+
+function setAlwaysOnTopEnabled(on) {
+  saveSettings({ alwaysOnTop: !!on });
+  if (!win || win.isDestroyed()) return;
+  if (on) {
+    keepWindowOnTop(true);
+  } else {
+    win.setAlwaysOnTop(false);
+  }
+  buildTrayMenu();
+}
+
+// 에이전트 모드. 항상 위는 유지하되 화면 캡처에서 창을 제외하고(에이전트의
+// 스크린샷에 안 찍힘) 마우스 이벤트를 아래 창으로 통과시킨다(클릭을 안 먹음).
+// 사용자가 카드 위에 잠시 머물면 렌더러가 통과를 잠깐 해제해 조작할 수 있다.
+function isAgentModeEnabled() {
+  return loadSettings().agentMode === true;
+}
+
+// 클릭 통과는 에이전트 모드의 하위 옵션이지만 기본은 꺼짐이다. 켜면 오버레이가
+// 마우스를 아래 창으로 흘려보내므로, 카드를 직접 누르려면 포인터를 잠깐 멈춰야 한다.
+function isClickThroughEnabled() {
+  const s = loadSettings();
+  return s.agentMode === true && s.clickThrough === true;
+}
+
+function applyAgentMode() {
+  if (!win || win.isDestroyed()) return;
+  try { win.setContentProtection(isAgentModeEnabled()); } catch {}
+  const through = isClickThroughEnabled();
+  setMousePassthrough(through);
+  win.webContents.send('agent-mode', { agentMode: isAgentModeEnabled(), clickThrough: through });
+}
+
+function setMousePassthrough(on) {
+  if (!win || win.isDestroyed()) return;
+  if (on) win.setIgnoreMouseEvents(true, { forward: true });
+  else win.setIgnoreMouseEvents(false);
+}
+
+function setAgentModeEnabled(on) {
+  saveSettings({ agentMode: !!on });
+  applyAgentMode();
+  buildTrayMenu();
+}
+
+function setClickThroughEnabled(on) {
+  saveSettings({ clickThrough: !!on });
+  applyAgentMode();
+  buildTrayMenu();
 }
 
 function currentMode() {
@@ -184,7 +242,7 @@ function createWindow() {
     ...pos,
     frame: false,
     transparent: true,
-    alwaysOnTop: true,
+    alwaysOnTop: isAlwaysOnTopEnabled(),
     skipTaskbar: false,
     resizable: false,
     maximizable: false,
@@ -225,6 +283,7 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', () => {
     win.webContents.send('mode', currentMode());
+    applyAgentMode();
     sendPrefs();
     tick();
   });
@@ -366,6 +425,25 @@ function buildTrayMenu() {
       click: (item) => setAutostart(item.checked)
     },
     {
+      label: '항상 위에 표시',
+      type: 'checkbox',
+      checked: isAlwaysOnTopEnabled(),
+      click: (item) => setAlwaysOnTopEnabled(item.checked)
+    },
+    {
+      label: '에이전트 모드 (화면 캡처에서 제외)',
+      type: 'checkbox',
+      checked: isAgentModeEnabled(),
+      click: (item) => setAgentModeEnabled(item.checked)
+    },
+    {
+      label: '  └ 클릭도 아래 창으로 통과',
+      type: 'checkbox',
+      enabled: isAgentModeEnabled(),
+      checked: isClickThroughEnabled(),
+      click: (item) => setClickThroughEnabled(item.checked)
+    },
+    {
       label: '위치 초기화',
       click: resetPosition
     },
@@ -435,7 +513,10 @@ ipcMain.on('set-chart-collapsed', (_event, { id, collapsed }) => {
 // ── 설정 패널 IPC ──────────────────────────────────────
 ipcMain.handle('get-settings', () => ({
   showChart: currentPrefs().showChart,
-  autostart: isAutostart()
+  autostart: isAutostart(),
+  alwaysOnTop: isAlwaysOnTopEnabled(),
+  agentMode: isAgentModeEnabled(),
+  clickThrough: isClickThroughEnabled()
 }));
 
 ipcMain.on('set-show-chart', (_event, on) => {
@@ -445,6 +526,14 @@ ipcMain.on('set-show-chart', (_event, on) => {
 });
 
 ipcMain.on('set-autostart', (_event, on) => setAutostart(!!on));
+ipcMain.on('set-always-on-top', (_event, on) => setAlwaysOnTopEnabled(!!on));
+ipcMain.on('set-agent-mode', (_event, on) => setAgentModeEnabled(!!on));
+ipcMain.on('set-click-through', (_event, on) => setClickThroughEnabled(!!on));
+// 에이전트 모드에서만 유효: 렌더러가 호버 상태에 따라 통과를 잠시 해제/복구
+ipcMain.on('set-mouse-passthrough', (_event, on) => {
+  if (!isClickThroughEnabled()) return;
+  setMousePassthrough(!!on);
+});
 ipcMain.on('reset-position', resetPosition);
 ipcMain.on('refresh-now', () => tick());
 ipcMain.on('quit-app', () => app.quit());
