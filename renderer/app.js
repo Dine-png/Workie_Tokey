@@ -142,8 +142,18 @@ function renderBadge(line, accent) {
   return div;
 }
 
+// 접힘 키는 "프로바이더/차트키". 구버전(프로바이더 단위) 저장값은 폴백으로 읽는다.
+function chartCollapseKey(providerId, line) {
+  return `${providerId}/${line.key}`;
+}
+
 function renderBarChart(line, accent, providerId) {
-  const collapsed = isChartCollapsed(providerId);
+  const legacyId = providerId;
+  providerId = chartCollapseKey(providerId, line);
+  const c = prefs.chartCollapsed;
+  const collapsed = (c && typeof c === 'object' && Object.prototype.hasOwnProperty.call(c, providerId))
+    ? !!c[providerId]
+    : isChartCollapsed(legacyId);
   const div = document.createElement('div');
   div.className = collapsed ? 'row chart-row collapsed' : 'row chart-row';
 
@@ -170,7 +180,7 @@ function renderBarChart(line, accent, providerId) {
     top.append(n);
   }
   top.addEventListener('click', () => {
-    const next = !isChartCollapsed(providerId);
+    const next = !collapsed;
     if (typeof prefs.chartCollapsed !== 'object' || prefs.chartCollapsed === null) {
       prefs.chartCollapsed = {};
     }
@@ -332,8 +342,10 @@ collapseTitleEl.addEventListener('keydown', (event) => {
 // 컴팩트 칩은 짧게 누르면 어디서든 확대되고, 일정 거리 이상 끌면
 // 기존처럼 위치를 옮긴다.
 let chipPointer = null;
+let suppressChipClick = false;
 chipEl.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0) return;
+  if (event.button !== 0 || chipPointer) return;
+  suppressChipClick = false;
   chipPointer = { id: event.pointerId, x: event.screenX, y: event.screenY, moved: false };
   chipEl.setPointerCapture(event.pointerId);
   window.workieTokey.startWindowDrag();
@@ -347,23 +359,27 @@ chipEl.addEventListener('pointermove', (event) => {
   chipEl.classList.add('dragging');
   window.workieTokey.moveWindowDrag(dx, dy);
 });
-function finishChipPointer(event, expand) {
+function finishChipPointer(event, cancelled) {
   if (!chipPointer || event.pointerId !== chipPointer.id) return;
-  const moved = chipPointer.moved;
+  suppressChipClick = cancelled || chipPointer.moved;
   chipPointer = null;
   chipEl.classList.remove('dragging');
+  if (chipEl.hasPointerCapture(event.pointerId)) chipEl.releasePointerCapture(event.pointerId);
   window.workieTokey.endWindowDrag();
-  if (expand && !moved) window.workieTokey.toggleMode();
 }
-chipEl.addEventListener('pointerup', (event) => finishChipPointer(event, true));
-chipEl.addEventListener('pointercancel', (event) => finishChipPointer(event, false));
+chipEl.addEventListener('pointerup', (event) => finishChipPointer(event, false));
+chipEl.addEventListener('pointercancel', (event) => finishChipPointer(event, true));
+chipEl.addEventListener('lostpointercapture', (event) => finishChipPointer(event, true));
+chipEl.addEventListener('click', (event) => {
+  // 포인터를 놓은 뒤의 실제 click에서 전환해야 드래그 취소와 구분할 수 있다.
+  if (event.detail > 0 && !suppressChipClick) window.workieTokey.toggleMode();
+});
 chipEl.addEventListener('keydown', (event) => {
   if (event.target !== chipEl || (event.key !== 'Enter' && event.key !== ' ')) return;
   event.preventDefault();
   window.workieTokey.toggleMode();
 });
-// 포커스된 화살표 버튼의 키보드 활성화는 유지하되 포인터 클릭은 위의
-// 칩 전체 처리기가 한 번만 담당한다.
+// 포커스된 화살표 버튼의 키보드 활성화는 유지하되 포인터 클릭은 칩이 담당한다.
 document.getElementById('toggle-chip').addEventListener('click', (event) => {
   if (event.detail === 0) window.workieTokey.toggleMode();
 });
@@ -388,6 +404,12 @@ async function openSettings() {
   applySwitch(agentModeRow, s.agentMode);
   applySwitch(clickThroughRow, s.clickThrough);
   clickThroughRow.classList.toggle('disabled', !s.agentMode);
+  try {
+    authList = (await window.workieTokey.getAuthStatus()) || [];
+  } catch {
+    authList = [];
+  }
+  renderAuth();
   cardEl.classList.add('settings-open');
   settingsEl.classList.remove('hidden');
   reportSize();
@@ -433,49 +455,109 @@ clickThroughRow.addEventListener('click', () => {
   window.workieTokey.setClickThrough(on);
 });
 
-// ── 클릭 통과: 포인터가 멈추면 곧바로 조작 허용 ─────────
-// 통과 중에도 forward 옵션 덕분에 mousemove는 들어온다. 예전에는 "창에 들어온
-// 지 0.5초"를 기준으로 삼아서, 그보다 빨리 누르는 사람의 첫 클릭과 드래그
-// 시작이 아래 창으로 새어 나갔다. 이제는 "포인터가 STILL_MS 동안 멈췄는지"를
-// 본다. 사람은 누르기 직전에 손을 멈추므로 사실상 즉시 반응하고, 에이전트는
-// 좌표로 순간 이동한 뒤 곧바로 클릭하므로 통과 상태가 유지된다.
-// 한 번 풀린 뒤에는 창을 벗어날 때까지 계속 조작할 수 있어 드래그가 끊기지 않는다.
-const STILL_MS = 120;
-let clickThrough = false;
-let stillTimer = null;
-let interactive = false;
-
-function setInteractive(on) {
-  if (interactive === on) return;
-  interactive = on;
-  window.workieTokey.setMousePassthrough(!on);
-}
-
-function endInteractive() {
-  clearTimeout(stillTimer);
-  stillTimer = null;
-  setInteractive(false);
-}
-
-document.addEventListener('mousemove', () => {
-  if (!clickThrough || interactive) return;
-  clearTimeout(stillTimer);
-  stillTimer = setTimeout(() => {
-    stillTimer = null;
-    if (clickThrough) setInteractive(true);
-  }, STILL_MS);
-});
-document.addEventListener('mouseleave', endInteractive);
-
 window.workieTokey.onAgentMode((state) => {
-  clickThrough = !!(state && state.clickThrough);
   document.body.classList.toggle('agent-mode', !!(state && state.agentMode));
-  if (!clickThrough) {
-    clearTimeout(stillTimer);
-    stillTimer = null;
-    interactive = false;
-  }
+  applySwitch(agentModeRow, state && state.agentMode);
+  applySwitch(clickThroughRow, state && state.clickThrough);
+  clickThroughRow.classList.toggle('disabled', !(state && state.agentMode));
 });
+// ── 계정(자체 로그인) ───────────────────────────────────
+// 각 프로바이더 행: 상태 텍스트 + 로그인/로그아웃/취소 버튼.
+// Claude는 localhost 리다이렉트가 막힌 경우를 위해 코드 붙여넣기 입력도 제공.
+const authRowsEl = document.getElementById('auth-rows');
+let authList = [];
+let authNotes = {}; // id → 마지막 결과 메시지
+
+function authStatusText(a) {
+  if (a.pending) return a.manual ? '브라우저에서 승인 후 코드를 붙여넣으세요' : '브라우저에서 승인 대기 중…';
+  if (authNotes[a.id]) return authNotes[a.id];
+  if (a.source === 'app') return '워키토키로 로그인됨';
+  if (a.source === 'cli') return 'CLI 로그인 공유 중';
+  return '로그인 안 됨';
+}
+
+function renderAuth() {
+  const nodes = [];
+  for (const a of authList) {
+    const row = document.createElement('div');
+    row.className = 'settings-row auth-row';
+
+    const main = document.createElement('div');
+    main.className = 'auth-main';
+    const label = document.createElement('span');
+    label.className = 'settings-label';
+    label.textContent = a.label;
+    const status = document.createElement('span');
+    status.className = 'auth-status' + (a.source ? ' ok' : '') + (authNotes[a.id] && authNotes[a.id].startsWith('실패') ? ' err' : '');
+    status.textContent = authStatusText(a);
+    main.append(label, status);
+    row.append(main);
+
+    const btn = document.createElement('button');
+    btn.className = 'auth-btn';
+    if (a.pending) {
+      btn.textContent = '취소';
+      btn.classList.add('quiet');
+      btn.addEventListener('click', () => window.workieTokey.authCancel(a.id));
+    } else if (a.source === 'app') {
+      btn.textContent = '로그아웃';
+      btn.classList.add('quiet');
+      btn.addEventListener('click', () => {
+        delete authNotes[a.id];
+        window.workieTokey.authLogout(a.id);
+      });
+    } else {
+      btn.textContent = a.source === 'cli' ? '따로 로그인' : '로그인';
+      btn.title = a.source === 'cli' ? 'CLI와 별개로 워키토키 자체 계정 토큰을 만듭니다' : '';
+      btn.addEventListener('click', async () => {
+        delete authNotes[a.id];
+        const r = await window.workieTokey.authLogin(a.id);
+        if (!r || !r.ok) {
+          authNotes[a.id] = `실패: ${(r && r.error) || 'unknown'}`;
+          renderAuth();
+        }
+      });
+    }
+    if (a.canLogin) row.append(btn);
+    nodes.push(row);
+
+    if (a.pending && a.canPaste) {
+      const paste = document.createElement('div');
+      paste.className = 'auth-paste';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = '코드 붙여넣기 (code#state)';
+      input.spellcheck = false;
+      const send = document.createElement('button');
+      send.className = 'auth-btn';
+      send.textContent = '확인';
+      const submit = async () => {
+        const ok = await window.workieTokey.authSubmitCode(a.id, input.value);
+        if (!ok) {
+          authNotes[a.id] = '실패: 코드가 비어 있음';
+          renderAuth();
+        }
+      };
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+      send.addEventListener('click', submit);
+      paste.append(input, send);
+      nodes.push(paste);
+    }
+  }
+  authRowsEl.replaceChildren(...nodes);
+  reportSize();
+}
+
+window.workieTokey.onAuthStatus((list) => {
+  authList = list || [];
+  renderAuth();
+});
+window.workieTokey.onAuthResult((r) => {
+  if (!r) return;
+  authNotes[r.id] = r.ok ? '로그인 완료' : `실패: ${r.error || 'unknown'}`;
+  renderAuth();
+});
+
 document.getElementById('set-refresh').addEventListener('click', () => {
   window.workieTokey.refreshNow();
   closeSettings();

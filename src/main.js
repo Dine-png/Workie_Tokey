@@ -4,6 +4,8 @@ const fs = require('fs');
 const { execFileSync } = require('child_process');
 const registry = require('./providers');
 const httpapi = require('./httpapi');
+const history = require('./history');
+const L = require('./providers/lines');
 const { makeTrayPng } = require('./trayicon');
 
 const POLL_MS = 30 * 1000;
@@ -120,6 +122,7 @@ function restorePosition(x, y, width, height) {
 // 실제 z-order 맨 위까지 올린다. 둘 다 포커스는 빼앗지 않는다.
 function keepWindowOnTop(force = false) {
   if (!win || win.isDestroyed()) return;
+  if (!win.isVisible() || win.isMinimized()) return;
   if (!isAlwaysOnTopEnabled()) return;
   if (force || !win.isAlwaysOnTop()) {
     win.setAlwaysOnTop(true, 'screen-saver', 1);
@@ -146,18 +149,22 @@ function setAlwaysOnTopEnabled(on) {
   buildTrayMenu();
 }
 
-// 에이전트 모드. 항상 위는 유지하되 화면 캡처에서 창을 제외하고(에이전트의
-// 스크린샷에 안 찍힘) 마우스 이벤트를 아래 창으로 통과시킨다(클릭을 안 먹음).
-// 사용자가 카드 위에 잠시 머물면 렌더러가 통과를 잠깐 해제해 조작할 수 있다.
+// 에이전트 모드는 화면 캡처에서만 창을 제외한다. 마우스 입력은 별도 옵션이다.
 function isAgentModeEnabled() {
   return loadSettings().agentMode === true;
 }
 
-// 클릭 통과는 에이전트 모드의 하위 옵션이지만 기본은 꺼짐이다. 켜면 오버레이가
-// 마우스를 아래 창으로 흘려보내므로, 카드를 직접 누르려면 포인터를 잠깐 멈춰야 한다.
+// 포인터 속도로 사람/자동화를 구분하면 첫 클릭이 유실된다. 클릭 통과는
+// 명시적으로 켜고 트레이에서 해제하는 모드로만 제공한다.
 function isClickThroughEnabled() {
   const s = loadSettings();
   return s.agentMode === true && s.clickThrough === true;
+}
+
+function migrateInteractionSettings() {
+  if (loadSettings().clickThroughControl === 'manual') return;
+  // 구버전의 자동 호버 해제를 기대하고 켠 설정은 그대로 복원하지 않는다.
+  saveSettings({ clickThrough: false, clickThroughControl: 'manual' });
 }
 
 function applyAgentMode() {
@@ -170,12 +177,11 @@ function applyAgentMode() {
 
 function setMousePassthrough(on) {
   if (!win || win.isDestroyed()) return;
-  if (on) win.setIgnoreMouseEvents(true, { forward: true });
-  else win.setIgnoreMouseEvents(false);
+  win.setIgnoreMouseEvents(!!on);
 }
 
 function setAgentModeEnabled(on) {
-  saveSettings({ agentMode: !!on });
+  saveSettings({ agentMode: !!on, ...(!on ? { clickThrough: false } : {}) });
   applyAgentMode();
   buildTrayMenu();
 }
@@ -290,8 +296,16 @@ function createWindow() {
 }
 
 // 모든 등록된 프로바이더를 수집 → { collectedAt, providers: [...] }
+// 수집 결과는 한도 소비 기록(history)에 샘플로 남긴다. 이 기록은 HTTP API의
+// /history 요약에만 쓰이고, 오버레이에는 별도 차트로 표시하지 않는다.
 async function collect() {
-  return registry.collectAll();
+  const state = await registry.collectAll();
+  try {
+    history.record(state);
+  } catch (err) {
+    console.error('[history] record failed:', err.message);
+  }
+  return state;
 }
 
 // 상태에서 모든 progress 라인을 (프로바이더 + 라인) 쌍으로 평탄화
@@ -437,7 +451,7 @@ function buildTrayMenu() {
       click: (item) => setAgentModeEnabled(item.checked)
     },
     {
-      label: '  └ 클릭도 아래 창으로 통과',
+      label: '  └ 클릭 통과 (트레이 클릭으로 해제)',
       type: 'checkbox',
       enabled: isAgentModeEnabled(),
       checked: isClickThroughEnabled(),
@@ -455,13 +469,17 @@ function buildTrayMenu() {
 function createTray() {
   tray = new Tray(nativeImage.createFromBuffer(makeTrayPng(100, false)));
   tray.setToolTip('Workie Tokey — AI 토큰 잔량');
-  // 트레이 클릭: 숨겨져 있으면 펼쳐진 카드 상태로 복귀, 보이면 숨김
+  // 클릭 통과 중에는 트레이가 복구 경로다. 창을 숨기지 않고 조작부터 복구한다.
   tray.on('click', () => {
     if (!win || win.isDestroyed()) return;
-    if (win.isVisible()) {
+    if (!isClickThroughEnabled() && win.isVisible() && !win.isMinimized()) {
       win.hide();
     } else {
+      setClickThroughEnabled(false);
+      if (win.isMinimized()) win.restore();
       win.show();
+      win.focus();
+      keepWindowOnTop(true);
       if (currentMode() === 'compact') setMode('card');
     }
   });
@@ -529,14 +547,78 @@ ipcMain.on('set-autostart', (_event, on) => setAutostart(!!on));
 ipcMain.on('set-always-on-top', (_event, on) => setAlwaysOnTopEnabled(!!on));
 ipcMain.on('set-agent-mode', (_event, on) => setAgentModeEnabled(!!on));
 ipcMain.on('set-click-through', (_event, on) => setClickThroughEnabled(!!on));
-// 에이전트 모드에서만 유효: 렌더러가 호버 상태에 따라 통과를 잠시 해제/복구
-ipcMain.on('set-mouse-passthrough', (_event, on) => {
-  if (!isClickThroughEnabled()) return;
-  setMousePassthrough(!!on);
-});
 ipcMain.on('reset-position', resetPosition);
 ipcMain.on('refresh-now', () => tick());
 ipcMain.on('quit-app', () => app.quit());
+
+// ── 계정(자체 로그인) IPC ───────────────────────────────
+// 프로바이더가 login/logout/authStatus 를 export 하면 설정 패널에 계정 행이 생긴다.
+function providerById(id) {
+  return registry.providers.find((p) => p.manifest.id === id) || null;
+}
+
+function authStatusAll() {
+  const out = [];
+  for (const p of registry.providers) {
+    if (typeof p.authStatus !== 'function') continue;
+    let st = { source: null, pending: false, manual: false };
+    try { st = p.authStatus(); } catch {}
+    out.push({
+      id: p.manifest.id,
+      label: p.manifest.label,
+      canLogin: typeof p.login === 'function',
+      canPaste: typeof p.submitCode === 'function',
+      ...st
+    });
+  }
+  return out;
+}
+
+function sendAuthStatus() {
+  if (!win || win.isDestroyed()) return;
+  win.webContents.send('auth-status', authStatusAll());
+}
+
+ipcMain.handle('get-auth-status', () => authStatusAll());
+
+ipcMain.handle('auth-login', async (_event, id) => {
+  const p = providerById(id);
+  if (!p || typeof p.login !== 'function') return { ok: false, error: 'unsupported' };
+  let started;
+  try {
+    started = await p.login();
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  sendAuthStatus();
+  if (started && started.ok && started.done) {
+    started.done.then((result) => {
+      if (win && !win.isDestroyed()) win.webContents.send('auth-result', { id, ...result });
+      sendAuthStatus();
+      if (result && result.ok) tick();
+    });
+  }
+  return { ok: !!(started && started.ok), manual: !!(started && started.manual), error: started && started.error };
+});
+
+ipcMain.handle('auth-submit-code', (_event, { id, text }) => {
+  const p = providerById(id);
+  if (!p || typeof p.submitCode !== 'function') return false;
+  return p.submitCode(text);
+});
+
+ipcMain.on('auth-cancel', (_event, id) => {
+  const p = providerById(id);
+  if (p && typeof p.cancelLogin === 'function') p.cancelLogin();
+  sendAuthStatus();
+});
+
+ipcMain.on('auth-logout', (_event, id) => {
+  const p = providerById(id);
+  if (p && typeof p.logout === 'function') p.logout();
+  sendAuthStatus();
+  tick();
+});
 
 
 app.setAppUserModelId('com.workietokey.app');
@@ -553,6 +635,7 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(() => {
     // requestSingleInstanceLock을 사용하지 않는 설치본이 남아 있다면 여기서 종료한다.
     stopLegacyInstances();
+    migrateInteractionSettings();
 
     const savedTheme = loadSettings().theme;
     if (savedTheme === 'light' || savedTheme === 'dark') {
@@ -562,12 +645,15 @@ if (!hasSingleInstanceLock) {
     createTray();
     pollTimer = setInterval(tick, POLL_MS);
     if (loadSettings().httpApi !== false) {
-      apiServer = httpapi.start(() => latestState);
+      apiServer = httpapi.start(() => latestState, () => history.summary());
     }
   });
 }
 
-app.on('before-quit', rememberPosition);
+app.on('before-quit', () => {
+  rememberPosition();
+  history.flush();
+});
 
 app.on('window-all-closed', () => {
   clearInterval(pollTimer);

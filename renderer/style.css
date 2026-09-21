@@ -327,3 +327,51 @@ html, body {
 /* 클릭 통과는 에이전트 모드의 하위 옵션 */
 .settings-toggle.sub .settings-label { padding-left: 2px; }
 .settings-toggle.disabled { opacity: 0.4; pointer-events: none; }
+
+/* ── 설정: 계정 섹션 ─────────────────────────────────── */
+.settings-section {
+  color: var(--text-hint);
+  padding: 10px 6px 3px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.settings-section + .settings-row { border-top: none; }
+.auth-row { cursor: default; }
+.auth-row:hover { background: none; }
+.auth-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.auth-status { color: var(--text-hint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.auth-status.ok { color: var(--text-sub); }
+.auth-status.err { color: var(--warn-text); }
+.auth-btn {
+  -webkit-app-region: no-drag;
+  flex: none;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--track);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.auth-btn:hover { filter: brightness(0.95); }
+.auth-btn.quiet { background: none; color: var(--text-sub); }
+.auth-paste {
+  display: flex;
+  gap: 6px;
+  padding: 0 6px 8px;
+}
+.auth-paste input {
+  -webkit-app-region: no-drag;
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 7px;
+  outline: none;
+}
+.auth-paste input:focus { border-color: var(--text-sub); }

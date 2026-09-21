@@ -38,7 +38,11 @@ npm run dist
 - **트레이 아이콘**: 잔량 게이지로 실시간 변함(가장 적게 남은 윈도우 기준, 20% 이하면 레드),
   마우스를 올리면 "Claude N% · Codex N% 남음" 툴팁.
   클릭 = 창 숨김/복귀 (숨겼다 복귀하면 펼쳐진 카드 상태)
+  클릭 통과 중에는 트레이 클릭으로 통과를 해제하고 카드를 복귀시킨다.
 - **트레이 우클릭**: 메뉴(새로고침, 자동 시작, 위치 초기화, 종료)
+- **에이전트 모드**: 화면 캡처에서만 제외하며 카드 클릭/드래그는 그대로 가능하다.
+  별도 `클릭 통과`를 켜면 아래 창이 클릭된다. 해제하려면 트레이 아이콘을 클릭한다.
+  이전 버전의 호버 기반 클릭 통과 설정은 업데이트 시 한 번 꺼진다.
 - 잔량 20% 이하로 떨어지면 토스트 알림 (윈도우별 1회)
 
 ## 데이터 소스 (프로바이더)
@@ -55,7 +59,25 @@ HTTP API 수정 없이 새 소스가 추가된다. `probe()` 는 정규화된 *�
 - **Gemini**: `~/.gemini/oauth_creds.json`(Gemini CLI 로그인) → 토큰 갱신 후
   `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota`. 모델별 요청 쿼터(`remainingFraction`).
 
-모두 로컬에 저장된 기존 로그인 토큰을 읽어 쓴다(별도 로그인 불필요). 표기는 **남은 %** 기준.
+표기는 **남은 %** 기준. 자격증명은 두 곳 중 먼저 찾는 것을 쓴다:
+
+1. **워키토키 자체 로그인** — 카드의 `⚙ 설정 › 계정` 에서 프로바이더별 `로그인`.
+   CLI가 하는 것과 같은 OAuth(PKCE) 흐름으로 브라우저에서 승인하면 끝이다.
+   토큰은 `settings.json` 옆 `auth.json` 에 따로 저장되어 CLI 로그인을 건드리지 않는다.
+   Claude는 localhost 리다이렉트가 막힌 경우 콘솔이 보여주는 `code#state` 를 붙여넣을 수 있다.
+2. **CLI 로그인 공유** — Claude Code · Codex CLI · Gemini CLI 가 남긴 토큰 파일을 그대로 읽는다.
+
+잔량 자체는 **계정 단위 쿼터**라 Claude Desktop, claude.ai, ChatGPT 데스크톱 등 어떤
+클라이언트에서 쓴 분량이든 같은 숫자에 반영된다. CLI를 설치하지 않은 PC에서도 1번만으로 쓸 수 있다.
+
+> Claude/Codex 로그인은 각 CLI의 공개 OAuth 클라이언트 ID를 쓴다. 제공사 정책이 바뀌면 막힐 수 있다.
+
+## 사용량 추이 차트
+
+- **최근 7일 사용량** — CLI 로컬 로그(`~/.claude/projects`, `~/.codex/sessions`)의 토큰 수 합산.
+  CLI 세션만 잡힌다.
+- 폴링한 usage API의 used% 변화량은 `history.json` 에 14일 보관하며 오버레이에는 표시하지 않고
+  로컬 HTTP API의 `/history` 로만 제공한다.
 
 ## 로컬 HTTP API
 
@@ -64,6 +86,7 @@ HTTP API 수정 없이 새 소스가 추가된다. `probe()` 는 정규화된 *�
 
 ```sh
 curl http://127.0.0.1:6736/usage     # { ok, providers:[{id,label,realtime,windows:[{key,remainingPercent,usedPercent,resetsAt}]}] }
+curl http://127.0.0.1:6736/history   # { ok, series:{ "<provider>/<window>": { latest, dailyUsedPercent:{ "YYYY-MM-DD": % } } } }
 curl http://127.0.0.1:6736/healthz   # { ok: true }
 ```
 

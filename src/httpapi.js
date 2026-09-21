@@ -33,8 +33,9 @@ function toPublic(state) {
 }
 
 // getSnapshot: () => 최신 내부 state
+// getHistory: () => 한도 소비 기록 요약 (선택)
 // 반환: { server, port } (start됨). 포트 충돌 시 다음 포트로 폴백.
-function start(getSnapshot, port = DEFAULT_PORT) {
+function start(getSnapshot, getHistory = null, port = DEFAULT_PORT) {
   const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const url = (req.url || '').split('?')[0];
@@ -50,6 +51,13 @@ function start(getSnapshot, port = DEFAULT_PORT) {
       res.end(body);
       return;
     }
+    if (url === '/history') {
+      let series = {};
+      try { series = getHistory ? getHistory() : {}; } catch {}
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true, generatedAt: Date.now(), series }, null, 2));
+      return;
+    }
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: false, error: 'not_found' }));
   });
@@ -57,7 +65,7 @@ function start(getSnapshot, port = DEFAULT_PORT) {
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE' && port < DEFAULT_PORT + 5) {
       console.warn(`[httpapi] port ${port} in use, trying ${port + 1}`);
-      setTimeout(() => start(getSnapshot, port + 1), 100);
+      setTimeout(() => start(getSnapshot, getHistory, port + 1), 100);
     } else {
       console.error('[httpapi]', err.message);
     }

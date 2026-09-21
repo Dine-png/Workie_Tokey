@@ -2,6 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const L = require('./lines');
+const authstore = require('../authstore');
+const oauth = require('../oauth');
 
 // ── Gemini (Google Code Assist / Gemini CLI 구독) 프로바이더 ────────
 // 자격증명: ~/.gemini/oauth_creds.json (Gemini CLI 로그인 시 생성)
@@ -9,6 +11,7 @@ const L = require('./lines');
 // 쿼터: POST cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota
 //   → buckets[].{ modelId, remainingFraction(0~1), resetTime, tokenType }
 // 검증 완료(2026-06-19): 빈 바디로 200, 모델별 REQUESTS 잔량 반환.
+// 자격증명 소스: 워키토키 자체 로그인(auth.json) 우선, 없으면 Gemini CLI 파일.
 
 const CRED_PATH = path.join(os.homedir(), '.gemini', 'oauth_creds.json');
 // gemini-cli 소스에 공개된 OAuth 클라이언트 (사용자별 비밀이 아니라
@@ -17,6 +20,13 @@ const CRED_PATH = path.join(os.homedir(), '.gemini', 'oauth_creds.json');
 const CLIENT_ID = '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com';
 const CLIENT_SECRET = ['GOCSPX', '4uHgMPm-1o7Sk-geV6Cu5clXFsxl'].join('-');
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
+const SCOPES = [
+  'https://www.googleapis.com/auth/cloud-platform',
+  'https://www.googleapis.com/auth/userinfo.email',
+  'https://www.googleapis.com/auth/userinfo.profile'
+].join(' ');
+const CALLBACK_PATH = '/oauth2callback';
 const LOAD_URL = 'https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist';
 const QUOTA_URL = 'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota';
 const CACHE_MS = 60 * 1000;
@@ -33,7 +43,7 @@ const manifest = {
 let cache = { at: 0, data: null };
 let projectCache = { at: 0, id: null };
 
-function loadCred() {
+function loadCliCred() {
   try {
     return JSON.parse(fs.readFileSync(CRED_PATH, 'utf8'));
   } catch {
@@ -41,11 +51,23 @@ function loadCred() {
   }
 }
 
-function saveCred(full) {
-  fs.writeFileSync(CRED_PATH, JSON.stringify(full, null, 2));
+// 자격증명 소스 선택: 워키토키 자체 로그인 → Gemini CLI 파일 순.
+// 둘 다 oauth_creds.json 과 같은 모양 { access_token, refresh_token, expiry_date }.
+function loadSource() {
+  const own = authstore.get('gemini');
+  if (own && own.refresh_token) return { kind: 'app', cred: own };
+  const cli = loadCliCred();
+  if (cli && cli.refresh_token) return { kind: 'cli', cred: cli };
+  return null;
 }
 
-async function refresh(cred) {
+function saveSource(src, next) {
+  if (src.kind === 'app') authstore.set('gemini', next);
+  else fs.writeFileSync(CRED_PATH, JSON.stringify(next, null, 2));
+}
+
+async function refresh(src) {
+  const cred = src.cred;
   const res = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -56,10 +78,16 @@ async function refresh(cred) {
       refresh_token: cred.refresh_token
     })
   });
-  if (!res.ok) return null;
+  if (!res.ok) {
+    // invalid_grant = 리프레시 토큰 폐기. 자체 로그인이면 지워서 재로그인 안내.
+    if (src.kind === 'app' && res.status === 400) {
+      try { authstore.remove('gemini'); } catch {}
+    }
+    return null;
+  }
   const j = await res.json();
   if (!j.access_token) return null;
-  // 갱신 결과를 파일에 write-back (Gemini CLI 세션과 공유). Google
+  // 갱신 결과를 write-back (CLI 파일이면 Gemini CLI 세션과 공유). Google
   // refresh_token은 회전하지 않으므로 기존 값을 유지한다.
   const next = {
     ...cred,
@@ -68,7 +96,7 @@ async function refresh(cred) {
   };
   if (j.id_token) next.id_token = j.id_token;
   try {
-    saveCred(next);
+    saveSource(src, next);
   } catch (err) {
     console.error('[gemini provider] credentials write-back failed:', err.message);
   }
@@ -76,12 +104,101 @@ async function refresh(cred) {
 }
 
 async function getAccessToken() {
-  const cred = loadCred();
-  if (!cred || !cred.refresh_token) return null;
+  const src = loadSource();
+  if (!src) return null;
+  const cred = src.cred;
   if (cred.access_token && cred.expiry_date && cred.expiry_date > Date.now() + 60 * 1000) {
     return cred.access_token;
   }
-  return refresh(cred);
+  return refresh(src);
+}
+
+// ── 워키토키 자체 로그인 (Gemini CLI와 같은 Google OAuth 흐름) ──────
+let pending = null;
+
+async function login() {
+  cancelLogin();
+  const { verifier, challenge } = oauth.pkce();
+  const state = oauth.randomState();
+  const session = oauth.loginSession({ port: 0, pathname: CALLBACK_PATH });
+  const port = await session.listening;
+  if (!port) {
+    session.cancel();
+    return { ok: false, error: 'port_busy' };
+  }
+  const redirectUri = `http://localhost:${port}${CALLBACK_PATH}`;
+  const url = `${AUTHORIZE_URL}?` + new URLSearchParams({
+    client_id: CLIENT_ID,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: SCOPES,
+    access_type: 'offline',
+    prompt: 'consent',
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    state
+  }).toString();
+
+  pending = { session };
+  await oauth.openBrowser(url);
+
+  const done = session.promise
+    .then(async ({ query }) => {
+      if (query.state && query.state !== state) throw new Error('state_mismatch');
+      await exchange(query, verifier, redirectUri);
+      return { ok: true };
+    })
+    .catch((err) => ({ ok: false, error: err.message }))
+    .finally(() => { if (pending && pending.session === session) pending = null; });
+  return { ok: true, manual: false, url, done };
+}
+
+function cancelLogin() {
+  if (pending) {
+    pending.session.cancel();
+    pending = null;
+  }
+}
+
+async function exchange(query, verifier, redirectUri) {
+  if (!query || !query.code) throw new Error(query && query.error ? query.error : 'no_code');
+  const res = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      code: query.code,
+      grant_type: 'authorization_code',
+      redirect_uri: redirectUri,
+      code_verifier: verifier
+    })
+  });
+  if (!res.ok) throw new Error(`http_${res.status}`);
+  const j = await res.json();
+  if (!j.access_token || !j.refresh_token) throw new Error('bad_response');
+  authstore.set('gemini', {
+    access_token: j.access_token,
+    refresh_token: j.refresh_token,
+    id_token: j.id_token || null,
+    scope: j.scope || SCOPES,
+    token_type: j.token_type || 'Bearer',
+    expiry_date: Date.now() + (j.expires_in ? j.expires_in * 1000 : 3600 * 1000),
+    loggedInAt: Date.now()
+  });
+  cache = { at: 0, data: null };
+  projectCache = { at: 0, id: null };
+}
+
+function logout() {
+  authstore.remove('gemini');
+  cache = { at: 0, data: null };
+  projectCache = { at: 0, id: null };
+}
+
+function authStatus() {
+  const src = loadSource();
+  return { source: src ? src.kind : null, pending: !!pending, manual: false };
 }
 
 // retrieveUserQuota는 사용자의 Code Assist 프로젝트를 body.project로 요구한다.
@@ -124,7 +241,7 @@ async function probe() {
   try {
     const token = await getAccessToken();
     if (!token) {
-      result = base({ error: 'auth', errorNote: '로그인 필요 (gemini)' });
+      result = base({ error: 'auth', errorNote: '로그인 필요 — ⚙ 설정' });
     } else {
       const project = await getProject(token);
       const res = await fetch(QUOTA_URL, {
@@ -187,7 +304,7 @@ function base(extra) {
   };
 }
 
-module.exports = { manifest, probe };
+module.exports = { manifest, probe, login, cancelLogin, logout, authStatus };
 
 if (require.main === module) {
   probe().then((d) => console.log(JSON.stringify(d, null, 2)));

@@ -3,11 +3,14 @@ const path = require('path');
 const os = require('os');
 const L = require('./lines');
 const trend = require('./claude-trend');
+const authstore = require('../authstore');
+const oauth = require('../oauth');
 
 // ── Claude Code 구독 사용량 프로바이더 ──────────────────────────────
 // 실시간: GET api.anthropic.com/api/oauth/usage
 // 토큰 만료 시 console.anthropic.com에서 refresh 후 파일에 write-back
 // (리프레시 토큰 회전 대응)
+// 자격증명 소스: 워키토키 자체 로그인(auth.json) 우선, 없으면 Claude Code 파일.
 
 const CRED_PATH = path.join(os.homedir(), '.claude', '.credentials.json');
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
@@ -17,6 +20,11 @@ const TOKEN_ENDPOINTS = [
   'https://claude.ai/v1/oauth/token'
 ];
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize';
+const SCOPES = 'org:create_api_key user:profile user:inference';
+const CALLBACK_PORT = 54545;
+const CALLBACK_PATH = '/callback';
+const MANUAL_REDIRECT = 'https://console.anthropic.com/oauth/code/callback';
 const CACHE_MS = 60 * 1000;
 
 const manifest = {
@@ -78,6 +86,25 @@ async function refreshToken(oauth) {
   return null;
 }
 
+// 자격증명 소스 선택: 워키토키 자체 로그인 → Claude Code CLI 파일 순.
+function loadSource() {
+  const own = authstore.get('claude');
+  if (own && own.refreshToken) return { kind: 'app', oauth: own };
+  const full = loadCredFile();
+  const cliOauth = full && full.claudeAiOauth;
+  if (cliOauth && cliOauth.refreshToken) return { kind: 'cli', oauth: cliOauth, full };
+  return null;
+}
+
+function saveSource(src, fresh) {
+  if (src.kind === 'app') {
+    authstore.set('claude', { ...src.oauth, ...fresh });
+  } else {
+    src.full.claudeAiOauth = { ...src.oauth, ...fresh };
+    saveCredFile(src.full);
+  }
+}
+
 // 진행 중인 refresh를 하나로 합쳐(in-flight dedup) 동시에 두 번 갱신하지
 // 않게 한다. Anthropic refresh token은 사용 시 회전(rotate)되므로, 폴링과
 // HTTP API가 동시에 refresh하면 한쪽이 토큰을 회전시켜 다른 쪽이
@@ -85,24 +112,29 @@ async function refreshToken(oauth) {
 let refreshInFlight = null;
 
 async function getAccessToken() {
-  const full = loadCredFile();
-  const oauth = full && full.claudeAiOauth;
-  if (!oauth || !oauth.refreshToken) {
+  const src = loadSource();
+  if (!src) {
     lastRefreshFailure = null;
     return null;
   }
-
-  if (oauth.accessToken && oauth.expiresAt && oauth.expiresAt > Date.now() + 60 * 1000) {
-    return oauth.accessToken;
+  const o = src.oauth;
+  if (o.accessToken && o.expiresAt && o.expiresAt > Date.now() + 60 * 1000) {
+    return o.accessToken;
   }
 
   if (refreshInFlight) return refreshInFlight;
   refreshInFlight = (async () => {
-    const fresh = await refreshToken(oauth);
-    if (!fresh) return null;
-    full.claudeAiOauth = { ...oauth, ...fresh };
+    const fresh = await refreshToken(o);
+    if (!fresh) {
+      // 자체 로그인 토큰이 완전히 만료됐으면 지워서 CLI 파일로 폴백하거나
+      // 재로그인을 안내한다.
+      if (src.kind === 'app' && lastRefreshFailure === 'expired') {
+        try { authstore.remove('claude'); } catch {}
+      }
+      return null;
+    }
     try {
-      saveCredFile(full);
+      saveSource(src, fresh);
     } catch (err) {
       console.error('[claude provider] credentials write-back failed:', err.message);
     }
@@ -113,6 +145,109 @@ async function getAccessToken() {
   } finally {
     refreshInFlight = null;
   }
+}
+
+// ── 워키토키 자체 로그인 (Claude Code와 같은 PKCE 흐름) ────────────
+// 브라우저에서 승인하면 localhost:54545/callback 으로 돌아온다. 포트를 못
+// 열거나 리다이렉트가 막히면 콘솔이 보여주는 "code#state" 를 submitCode()로
+// 붙여넣어도 된다.
+let pending = null;
+
+async function login() {
+  cancelLogin();
+  const { verifier, challenge } = oauth.pkce();
+  const session = oauth.loginSession({ port: CALLBACK_PORT, pathname: CALLBACK_PATH });
+  const listening = await session.listening;
+  const redirectUri = listening ? `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}` : MANUAL_REDIRECT;
+  const url = `${AUTHORIZE_URL}?` + new URLSearchParams({
+    code: 'true',
+    client_id: CLIENT_ID,
+    response_type: 'code',
+    redirect_uri: redirectUri,
+    scope: SCOPES,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    state: verifier
+  }).toString();
+
+  pending = { session, verifier, redirectUri };
+  await oauth.openBrowser(url);
+
+  const done = session.promise
+    .then(async ({ query }) => {
+      await exchange(query, verifier, redirectUri);
+      return { ok: true };
+    })
+    .catch((err) => ({ ok: false, error: err.message }))
+    .finally(() => { if (pending && pending.session === session) pending = null; });
+  return { ok: true, manual: !listening, url, done };
+}
+
+// 수동 붙여넣기: "code#state" 또는 code 만
+function submitCode(text) {
+  if (!pending) return false;
+  const t = String(text || '').trim();
+  if (!t) return false;
+  const [code, state] = t.split('#');
+  pending.session.submit({ code, state: state || pending.verifier });
+  return true;
+}
+
+function cancelLogin() {
+  if (pending) {
+    pending.session.cancel();
+    pending = null;
+  }
+}
+
+async function exchange(query, verifier, redirectUri) {
+  if (!query || !query.code) throw new Error('no_code');
+  let lastErr = 'exchange_failed';
+  for (const url of TOKEN_ENDPOINTS) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'authorization_code',
+        code: query.code,
+        state: query.state || verifier,
+        client_id: CLIENT_ID,
+        redirect_uri: redirectUri,
+        code_verifier: verifier
+      })
+    });
+    if (!res.ok) {
+      lastErr = `http_${res.status}`;
+      continue;
+    }
+    const j = await res.json();
+    if (!j.access_token || !j.refresh_token) {
+      lastErr = 'bad_response';
+      continue;
+    }
+    authstore.set('claude', {
+      accessToken: j.access_token,
+      refreshToken: j.refresh_token,
+      expiresAt: Date.now() + (j.expires_in ? j.expires_in * 1000 : 3600 * 1000),
+      scopes: typeof j.scope === 'string' ? j.scope.split(' ') : SCOPES.split(' '),
+      loggedInAt: Date.now()
+    });
+    lastRefreshFailure = null;
+    cache = { at: 0, data: null };
+    return;
+  }
+  throw new Error(lastErr);
+}
+
+function logout() {
+  authstore.remove('claude');
+  cache = { at: 0, data: null };
+}
+
+// 설정 패널 표시용: 어떤 소스로 로그인돼 있는지
+function authStatus() {
+  const src = loadSource();
+  return { source: src ? src.kind : null, pending: !!pending, manual: !!(pending && pending.redirectUri === MANUAL_REDIRECT) };
 }
 
 function windowRemaining(w) {
@@ -152,9 +287,9 @@ async function probe() {
     const { error, json } = await fetchUsage();
     if (error) {
       let errorNote = '연결 안 됨';
-      if (error === 'auth') errorNote = '로그인 필요 (claude /login)';
-      else if (error === 'auth_expired') errorNote = '로그인 만료 — claude /login';
-      else if (error === 'http_401') errorNote = '인증 거부 — claude /login';
+      if (error === 'auth') errorNote = '로그인 필요 — ⚙ 설정';
+      else if (error === 'auth_expired') errorNote = '로그인 만료 — ⚙ 설정';
+      else if (error === 'http_401') errorNote = '인증 거부 — ⚙ 설정';
       result = base({ error, errorNote });
     } else {
       lastRaw = json;
@@ -220,7 +355,7 @@ function base(extra) {
   };
 }
 
-module.exports = { manifest, probe, getLastRaw };
+module.exports = { manifest, probe, getLastRaw, login, submitCode, cancelLogin, logout, authStatus };
 
 if (require.main === module) {
   probe().then((d) => console.log(JSON.stringify(d, null, 2)));
